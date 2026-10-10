@@ -39,9 +39,10 @@ test('清单引用的文件都存在', () => {
   assert.deepEqual(missing, []);
 });
 
-test('权限只覆盖 hb.unsnow.org 与 linux.do', () => {
+test('权限只申请 hb.unsnow.org，不绑定任何浏览站点', () => {
   const hosts = manifest.host_permissions || [];
-  assert.deepEqual([...hosts].sort(), ['https://hb.unsnow.org/*', 'https://linux.do/*']);
+  assert.deepEqual([...hosts].sort(), ['https://hb.unsnow.org/*']);
+  assert.equal(manifest.content_scripts, undefined, '面板在浏览器层通用，不注册内容脚本');
 });
 
 test('扩展页面不加载远程脚本或样式', () => {

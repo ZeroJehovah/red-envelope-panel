@@ -9,8 +9,9 @@
   const api = globalThis.HBApi;
   const VERSION = api.runtime.getManifest().version;
   const STATE_KEY = 'hb-state-v1';
-  const FORUM_URL = 'https://linux.do/';
-  const FORUM_LABEL = 'linux.do';
+  // 面板与站点无关：入口只有扩展图标与浏览器侧边栏，红包站只作为登录与核对记录的跳转目标。
+  const SITE_URL = 'https://hb.unsnow.org/';
+  const SITE_LABEL = 'hb.unsnow.org';
 
   const STATUS_LABEL = {
     queued: '排队中',
@@ -35,7 +36,7 @@
     <header class="hb-header">
       <div class="hb-heading">
         <h1 class="hb-title">红包口令面板</h1>
-        <span class="hb-subtitle">hb.unsnow.org</span>
+        <span class="hb-subtitle">红包口令</span>
       </div>
       <span class="hb-version" id="hb-version"></span>
     </header>
@@ -51,7 +52,7 @@
     <section class="hb-card hb-meta" id="hb-meta"></section>
     <section class="hb-actions">
       <button type="button" class="hb-button hb-button--primary" id="hb-open-sidebar" hidden>在侧边栏常显</button>
-      <button type="button" class="hb-button" id="hb-open-forum"></button>
+      <button type="button" class="hb-button" id="hb-open-site"></button>
     </section>
     <p class="hb-hint" id="hb-hint"></p>
   `;
@@ -157,15 +158,16 @@
       sidebarButton.hidden = false;
       sidebarButton.addEventListener('click', () => openSidebar(hint));
       rememberWindowId();
+      hint.textContent = '面板在任意网站都可用；关闭面板不影响后台队列。';
     }
     if (!options.allowSidePanelOpen) {
       hint.textContent = '面板固定在浏览器侧边栏，可在侧边栏菜单中调整位置；关闭侧边栏不影响后台队列。';
     }
 
-    const forumButton = document.getElementById('hb-open-forum');
-    forumButton.textContent = '打开 ' + FORUM_LABEL;
-    forumButton.addEventListener('click', () => {
-      api.tabs.create({ url: FORUM_URL });
+    const siteButton = document.getElementById('hb-open-site');
+    siteButton.textContent = '打开 ' + SITE_LABEL;
+    siteButton.addEventListener('click', () => {
+      api.tabs.create({ url: SITE_URL });
     });
 
     const refresh = async () => {

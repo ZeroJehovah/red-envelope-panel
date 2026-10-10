@@ -1,8 +1,10 @@
-# src 源码约束（linuxdo-hongbao-sidebar 扩展）
+# src 源码约束（红包口令面板扩展）
 
 ## 定位
 
 本目录是浏览器扩展源码，公开仓库。只放代码、图标与公开说明，不放账号、Cookie、令牌、密钥、真实领取记录或内部抓包记录。
+
+扩展定位在**浏览器层**：面板与浏览的网站无关，不在页面里注入 UI，也不申请浏览站点的访问权限；只有后续可选的站点内嵌模式才需要单独评估站点权限。
 
 ## 结构
 
@@ -11,7 +13,6 @@ src/
 ├── manifest.json      # WebExtension 清单（MV3，Chrome 116+，side panel）
 ├── browser-shim.js    # browser/chrome 兼容层，暴露 globalThis.HBApi
 ├── background.js      # service worker：状态持有者、消息路由、hb.unsnow.org 请求代理
-├── content.js         # linux.do 内容脚本（里程碑 2 起承载页面内停靠/悬浮模式）
 ├── panel.js           # 弹出面板与侧边栏共用渲染器（HBPanel.mount）
 ├── panel.css          # 面板共用样式（莫兰迪配色）
 ├── popup.html/.js     # 点图标弹出面板的外壳
@@ -25,11 +26,11 @@ src/
 
 - **无构建步骤**：纯静态脚本，直接加载 `src/` 即可运行；不引入打包器、npm 依赖或远程资源。
 - **脚本形态**：后台与内容脚本使用普通脚本 + `importScripts`／`<script src>`，共享能力统一挂在 `globalThis.HBApi`（见 `browser-shim.js`），不依赖模块解析顺序以外的工具。
-- **网络**：只允许访问 `https://hb.unsnow.org` 与 `https://linux.do`；跨域请求只能由后台 service worker 发起，扩展页面与内容脚本不得直接请求。
+- **网络**：只允许访问 `https://hb.unsnow.org`；跨域请求只能由后台 service worker 发起，扩展页面不得直接请求。
+- **站点无关**：不注册内容脚本、不注入页面 DOM 或样式、不依赖任何浏览站点的 DOM 结构；可选的站点内嵌模式必须单独引入权限并在此处登记。
 - **状态**：`chrome.storage.local` 的 `hb-state-v1` 是唯一真实来源；所有写入必须经后台消息接口，扩展页面不做本地副本。
 - **领取授权**：任何写操作（领取、参与抽奖）都必须由真实用户点击授权，一次点击只放行一次请求；已发送的领取不自动重试。
 - **限速**：两次向 hb.unsnow.org 发起的查询间隔不低于 5 秒基础间隔加设置中的加时，跨面板、跨标签页共用同一节奏。
-- **不注入页面**：里程碑 1 不在论坛页面渲染任何东西；页面内停靠/悬浮模式属于里程碑 2，且必须与扩展面板共用同一状态层。
 - **CSP**：不加载远程代码、样式、字体；图标随包，头像等图形一律用 data URI 或内联 SVG。
 
 ## MV3 注意事项

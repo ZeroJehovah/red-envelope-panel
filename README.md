@@ -1,6 +1,8 @@
-# linux.do - hb.unsnow.org 红包口令面板（浏览器扩展）
+# 红包口令面板（浏览器扩展）
 
-把 [scripts](https://github.com/ZeroJehovah/scripts) 仓库中的 `linuxdo-hongbao-code-sidebar.user.js`（论坛侧边栏红包口令脚本）改造成 Chrome 扩展：在扩展图标弹出面板里提交 hb.unsnow.org 口令，或把面板固定在浏览器侧边栏常显，不再依赖脚本管理器。
+把 [scripts](https://github.com/ZeroJehovah/scripts) 仓库中的 `linuxdo-hongbao-code-sidebar.user.js`（原先挂在论坛侧边栏上的红包口令脚本）改造成 Chrome 扩展：在扩展图标弹出面板里提交 hb.unsnow.org 口令，或把面板固定在浏览器侧边栏常显。
+
+面板运行在浏览器层，**与浏览的网站无关**：不需要在论坛页面注入任何东西，刷任何网站时都能随时打开提交口令、查看领取结果。
 
 ## 当前状态
 
@@ -8,9 +10,9 @@
 
 ## 形态
 
-- **弹出面板**：点扩展图标打开，适合临时提交一两条口令。
-- **常显侧边栏**：`chrome.sidePanel`，可固定常显，适合边刷论坛边等待领取结果。
-- **页面内停靠/悬浮**（里程碑 2，可选）：沿用脚本版在论坛页面右侧的面板形态。
+- **弹出面板**：点扩展图标打开，适合临时提交一两条口令；在任意标签页都能唤出。
+- **常显侧边栏**：`chrome.sidePanel`，可固定常显，适合一边浏览一边等待领取结果。
+- **站点内嵌模式**（可选，后续里程碑）：沿用脚本版贴在页面右侧的停靠/悬浮形态；只有到这一步才需要申请对应站点的访问权限。
 
 ## 安装（开发）
 
@@ -24,7 +26,7 @@ Chrome（Manifest V3，116+）：
 
 - `manifest.json`（MV3）、`background.js`（service worker）、`browser-shim.js`（兼容层）
 - `popup.*`（点图标面板）、`sidepanel.*`（常显侧边栏）、`panel.js`／`panel.css`（两者共用的面板渲染与样式）
-- `content.js`（linux.do 内容脚本）、`icons/`、`tools/`、`tests/`
+- `icons/`、`tools/`、`tests/`
 
 约束与设计说明见 `AGENTS.md`，需求与计划见同级 `docs/`。
 
