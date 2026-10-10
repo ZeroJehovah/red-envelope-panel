@@ -1,73 +1,618 @@
 /* hb.unsnow.org 红包口令面板：后台 service worker。
  *
- * 里程碑 1 的职责：持有唯一状态副本、响应扩展页面与内容脚本的消息。
- * 里程碑 3 起：代理 hb.unsnow.org 请求，串行化 5 秒限速与领取写入。
+ * 职责：唯一状态副本、消息路由、hb.unsnow.org 请求代理、限速与队列。
+ * 与脚本版一致的关键语义：
+ *   - 请求只由后台发出，携带 hb.unsnow.org 会话 Cookie（credentials: 'include'）；
+ *   - 限速时间戳落在 chrome.storage.local，worker 被回收后仍然生效；
+ *   - 领取必须是真实点击授权后的一次性请求，发出后不自动重试；
+ *   - 删除按 ID 墓碑，写入按 ID 合并，绝不整体覆盖历史。
  *
- * MV3 提示：worker 空闲即休眠，内存变量不可跨唤醒保留，所有状态先读 chrome.storage.local。
+ * MV3 提示：worker 空闲即休眠，内存变量不可跨唤醒保留，因此状态读回与限速时间戳都以
+ * chrome.storage.local 为准；定时器只负责“唤醒后尽快执行”，不承担正确性。
  */
 'use strict';
 
-importScripts('browser-shim.js');
+importScripts('browser-shim.js', 'code-rules.js', 'hb-protocol.js');
 
 const api = globalThis.HBApi;
+const P = globalThis.HBProtocol;
+const codes = globalThis.HBCodes;
 const VERSION = api.runtime.getManifest().version;
 
-// 状态键沿用脚本版语义：entries 是口令历史，removed 是按 ID 的墓碑，settings 是面板配置。
 const STATE_KEY = 'hb-state-v1';
+const TICK_ALARM = 'hb-queue-tick';
+const TICK_ALARM_MINUTES = 0.5;      // 定时器丢失后的兜底唤醒；精度由内存定时器保证
+const WAIT_SLICE_MS = 30000;         // 单次等待上限，到点重新计算
+const REMOVED_MAX_AGE_MS = 30 * 24 * 3600 * 1000;
+const REMOVED_MAX_ENTRIES = 1000;
+
 const DEFAULT_SETTINGS = Object.freeze({
   charset: 'text',       // 'text'：6-18 字符文本口令；'numeric'：8 位数字口令
   batch: false,          // false：单个口令；true：批量口令（每行一条）
-  claimMode: 'manual',   // 'manual'：古法，弹窗手动开启；'direct'：协议，直接领取
+  claimMode: 'manual',   // 'manual'：古法，面板内点击开启；'direct'：协议，后台直接领取
   gapExtraMs: 0,         // 在 5 秒基础间隔之上追加的等待时间
   display: 'panel',      // 'panel'：点图标弹出面板；'sidebar'：常显侧边栏
 });
 
 function emptyState() {
-  return { entries: [], removed: [], settings: { ...DEFAULT_SETTINGS } };
+  return {
+    entries: [],
+    removed: [],
+    settings: { ...DEFAULT_SETTINGS },
+    paused: false,
+    pausedReason: '',
+    lastStartedAt: 0,
+  };
 }
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-async function loadState() {
-  const stored = await api.storage.local.get(STATE_KEY);
-  const saved = stored?.[STATE_KEY];
-  if (!isPlainObject(saved)) return emptyState();
+function createId() {
+  try {
+    if (typeof crypto?.randomUUID === 'function') return crypto.randomUUID();
+  } catch {
+    // 落到下面的计数式 ID。
+  }
+  return 'e' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+}
+
+/* --------------------------------- 状态层 --------------------------------- */
+
+// 一条口令从入队到落到历史的全过程；字段与脚本版 normalizeEntry 对齐。
+function normalizeEntry(raw) {
+  if (!raw || typeof raw !== 'object' || typeof raw.code !== 'string' || !raw.code) return null;
+  const statuses = ['queued', 'awaiting', 'running', 'done', 'failed', 'void'];
+  const startedAt = Number(raw.startedAt);
+  const finishedAt = Number(raw.finishedAt);
+  // 重载无法知道被打断的请求结果，按脚本版语义记为失败并写明“结果未确认”。
+  const interrupted = raw.status === 'running';
+  const lines = P.normalizeLines(raw.lines);
   return {
-    entries: Array.isArray(saved.entries) ? saved.entries : [],
-    removed: Array.isArray(saved.removed) ? saved.removed : [],
-    settings: { ...DEFAULT_SETTINGS, ...(isPlainObject(saved.settings) ? saved.settings : {}) },
+    id: typeof raw.id === 'string' && raw.id ? raw.id : createId(),
+    code: raw.code,
+    claimMode: raw.status === 'awaiting' ? 'manual' : (raw.claimMode === 'direct' ? 'direct' : 'manual'),
+    packetId: typeof raw.packetId === 'string' && raw.packetId ? raw.packetId : null,
+    matched: P.hasMatchedPacket(raw),
+    charset: raw.charset === 'numeric' ? 'numeric' : 'text',
+    // 等待人工开启的条目没有发出过领取请求，重载后重新查询。
+    status: raw.status === 'awaiting' ? 'queued' : (interrupted ? 'failed' : (statuses.includes(raw.status) ? raw.status : 'failed')),
+    result: interrupted ? P.INTERRUPTED_RESULT : (typeof raw.result === 'string' ? raw.result : ''),
+    lines: interrupted || raw.status === 'awaiting' ? null : lines,
+    packet: isPlainObject(raw.packet) ? raw.packet : null,
+    createdAt: Number.isFinite(Number(raw.createdAt)) ? Number(raw.createdAt) : Date.now(),
+    startedAt: Number.isFinite(startedAt) ? startedAt : null,
+    finishedAt: interrupted ? Date.now() : (Number.isFinite(finishedAt) ? finishedAt : null),
+    scheduledAt: null,
   };
 }
 
-async function patchState(patch) {
-  const state = await loadState();
-  const next = {
-    entries: Array.isArray(patch?.entries) ? patch.entries : state.entries,
-    removed: Array.isArray(patch?.removed) ? patch.removed : state.removed,
-    settings: { ...state.settings, ...(isPlainObject(patch?.settings) ? patch.settings : {}) },
+// 与 normalizeEntry 相同，但用于合并 storage 里已有的行：绝不把 running 降级成失败，
+// 那条请求还在别的实例手里，结果由它自己写回。
+function preserveEntry(raw) {
+  if (!raw || typeof raw !== 'object' || typeof raw.code !== 'string' || !raw.code) return null;
+  const statuses = ['queued', 'awaiting', 'running', 'done', 'failed', 'void'];
+  const startedAt = Number(raw.startedAt);
+  const finishedAt = Number(raw.finishedAt);
+  return {
+    id: typeof raw.id === 'string' && raw.id ? raw.id : createId(),
+    code: raw.code,
+    claimMode: raw.status === 'awaiting' ? 'manual' : (raw.claimMode === 'direct' ? 'direct' : 'manual'),
+    packetId: typeof raw.packetId === 'string' && raw.packetId ? raw.packetId : null,
+    matched: P.hasMatchedPacket(raw),
+    charset: raw.charset === 'numeric' ? 'numeric' : 'text',
+    status: statuses.includes(raw.status) ? raw.status : 'failed',
+    result: typeof raw.result === 'string' ? raw.result : '',
+    lines: P.normalizeLines(raw.lines),
+    packet: isPlainObject(raw.packet) ? raw.packet : null,
+    createdAt: Number.isFinite(Number(raw.createdAt)) ? Number(raw.createdAt) : Date.now(),
+    startedAt: Number.isFinite(startedAt) ? startedAt : null,
+    finishedAt: Number.isFinite(finishedAt) ? finishedAt : null,
+    scheduledAt: null,
   };
-  await api.storage.local.set({ [STATE_KEY]: next });
-  return next;
 }
 
-// 消息契约（扩展页面与内容脚本 → 后台）。
+function normalizeRemoved(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => ({
+      id: typeof item?.id === 'string' && item.id ? item.id : null,
+      at: Number.isFinite(Number(item?.at)) ? Number(item.at) : 0,
+    }))
+    .filter((item) => item.id);
+}
+
+function normalizeSettings(raw) {
+  const merged = { ...DEFAULT_SETTINGS, ...(isPlainObject(raw) ? raw : {}) };
+  return {
+    charset: merged.charset === 'numeric' ? 'numeric' : 'text',
+    batch: merged.batch === true,
+    claimMode: merged.claimMode === 'direct' ? 'direct' : 'manual',
+    gapExtraMs: P.clampGapExtra(merged.gapExtraMs),
+    display: merged.display === 'sidebar' ? 'sidebar' : 'panel',
+  };
+}
+
+function normalizeState(raw) {
+  const loaded = emptyState();
+  if (!isPlainObject(raw)) return loaded;
+  loaded.settings = normalizeSettings(raw.settings);
+  loaded.paused = Boolean(raw.paused);
+  loaded.pausedReason = typeof raw.pausedReason === 'string' ? raw.pausedReason : '';
+  loaded.lastStartedAt = Number.isFinite(Number(raw.lastStartedAt)) ? Number(raw.lastStartedAt) : 0;
+  loaded.entries = (Array.isArray(raw.entries) ? raw.entries : [])
+    .map(normalizeEntry)
+    .filter(Boolean)
+    .slice(-P.MAX_HISTORY_ENTRIES);
+  loaded.removed = normalizeRemoved(raw.removed);
+  if (loaded.removed.length) {
+    const gone = new Set(loaded.removed.map((item) => item.id));
+    loaded.entries = loaded.entries.filter((entry) => !gone.has(entry.id));
+  }
+  return loaded;
+}
+
+// 内存副本在 worker 存活期间是工作副本；每个消息进来先确保它已加载。
+let state = null;
+let loading = null;
+
+async function getState() {
+  if (state) return state;
+  if (!loading) {
+    loading = api.storage.local.get(STATE_KEY).then((bag) => normalizeState(bag?.[STATE_KEY]));
+  }
+  state = await loading;
+  loading = null;
+  return state;
+}
+
+function snapshot() {
+  return {
+    entries: state.entries,
+    removed: state.removed,
+    settings: state.settings,
+    paused: state.paused,
+    pausedReason: state.pausedReason,
+    lastStartedAt: state.lastStartedAt,
+  };
+}
+
+// 写入从不是整体覆盖：读回 storage 后按 id 合并，墓碑永远优先，
+// 超出上限的历史就地打成墓碑，老墓碑按 30 天清理。
+async function commit() {
+  const bag = await api.storage.local.get(STATE_KEY);
+  const stored = isPlainObject(bag?.[STATE_KEY]) ? bag[STATE_KEY] : null;
+
+  const removedAt = new Map();
+  const noteRemoved = (list) => {
+    for (const item of normalizeRemoved(list)) {
+      const known = removedAt.get(item.id);
+      if (known === undefined || item.at >= known) removedAt.set(item.id, item.at);
+    }
+  };
+  noteRemoved(stored?.removed);
+  noteRemoved(state.removed);
+
+  const byId = new Map();
+  for (const entry of (Array.isArray(stored?.entries) ? stored.entries : []).map(preserveEntry).filter(Boolean)) {
+    byId.set(entry.id, entry);
+  }
+  // 后台是唯一写入者：内存里更新的同 id 覆盖旧副本，其余条目原样保留。
+  for (const entry of state.entries) byId.set(entry.id, entry);
+
+  const entries = [...byId.values()]
+    .filter((entry) => !removedAt.has(entry.id))
+    .sort((a, b) => a.createdAt - b.createdAt);
+
+  const stamp = Date.now();
+  if (entries.length > P.MAX_HISTORY_ENTRIES) {
+    for (const entry of entries.splice(0, entries.length - P.MAX_HISTORY_ENTRIES)) removedAt.set(entry.id, stamp);
+  }
+
+  const removed = [...removedAt.entries()]
+    .filter(([, at]) => stamp - at < REMOVED_MAX_AGE_MS)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, REMOVED_MAX_ENTRIES)
+    .map(([id, at]) => ({ id, at }));
+
+  state.entries = entries;
+  state.removed = removed;
+  state.settings = normalizeSettings(state.settings);
+  await api.storage.local.set({ [STATE_KEY]: snapshot() });
+  return state;
+}
+
+/* -------------------------------- 请求代理 -------------------------------- */
+
+async function siteRequest(url, method) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), P.REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      method,
+      credentials: 'include',
+      cache: 'no-store',
+      // 与脚本版一致：POST 只声明 JSON，GET 只要 JSON。
+      headers: method === 'POST' ? { 'Content-Type': 'application/json' } : { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      data = null; // 响应不是 JSON 时按脚本版 responseType:'json' 的行为留空。
+    }
+    return { status: response.status, response: data };
+  } catch (error) {
+    throw new Error(error?.name === 'AbortError' ? '请求超时' : '网络失败，请检查登录或网络状态');
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function gapMs() {
+  return P.GAP_BASE_MS + P.clampGapExtra(state.settings.gapExtraMs);
+}
+
+// 等价于脚本版 sharedQuery：先读共享时间戳，等到间隔满足，写入时间戳后再发请求。
+// 时间戳存在 storage 里，所以 worker 被回收不会让下一次查询提前发出。
+async function sharedQuery(url) {
+  const gap = gapMs();
+  for (;;) {
+    const last = Number(state.lastStartedAt) || 0;
+    if (last > Date.now()) throw new Error('系统时钟早于共享时间戳，未发送请求');
+    const wait = gap - (Date.now() - last);
+    if (wait <= 0) break;
+    await sleep(Math.min(wait, WAIT_SLICE_MS));
+  }
+  state.lastStartedAt = Date.now();
+  await commit();
+  return siteRequest(url, 'GET');
+}
+
+let sessionPromise = null;
+
+async function packetSession() {
+  if (!sessionPromise) {
+    sessionPromise = siteRequest(P.sessionUrl(), 'GET')
+      .then((response) => {
+        const user = response.status === 200 && response.response?.user;
+        if (!user) sessionPromise = null;
+        return user ? { username: user.username, linuxdo_id: user.linuxdo_id } : null;
+      })
+      .catch(() => {
+        sessionPromise = null;
+        return null;
+      });
+  }
+  return sessionPromise;
+}
+
+/* --------------------------------- 领取 -------------------------------- */
+
+// 正在领取的条目：一次点击只放行一条请求，重复点击在这里被挡掉。
+const claiming = new Set();
+
+async function claimPacket(entry, packet) {
+  const match = P.matchLines(packet);
+  if (claiming.has(entry.id)) {
+    return { lines: match.concat(P.line('领取失败: 该口令正在处理中，未发送领取请求', 'error')) };
+  }
+  claiming.add(entry.id);
+  let sent = false;
+  try {
+    // 发出前先落状态：请求一旦发出，结果未确认时历史里必须有痕迹。
+    entry.status = 'running';
+    entry.lines = match.concat(P.line('正在开启红包…', 'muted'));
+    entry.result = P.linesText(entry.lines);
+    await commit();
+    sent = true;
+    const response = await siteRequest(P.grabUrl(packet.id), 'POST');
+    const receipt = P.claimReceipt(response);
+    return { ...receipt, lines: match.concat(receipt.lines) };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : '请求失败';
+    return {
+      lines: match.concat(P.line('领取失败: ' + reason
+        + (sent ? '；结果未确认，请到红包站核对，不会自动重试' : ''), 'error')),
+      pause: true,
+    };
+  } finally {
+    claiming.delete(entry.id);
+  }
+}
+
+async function runEntry(entry) {
+  const response = await sharedQuery(P.queryUrl(entry.code, entry.charset));
+  const outcome = P.queryOutcome(response);
+  if (!outcome.matched) return outcome;
+
+  const packet = outcome.packet;
+  entry.packetId = String(packet.id);
+  entry.matched = true;
+  entry.packet = P.packetSnapshot(packet);
+  await commit();
+
+  const user = await packetSession();
+  const decision = P.packetOutcome(packet, user);
+  // 不可领取的红包只更新历史，详情由面板按需展开。
+  if (decision) return decision;
+
+  // 领取方式在提交时固定：改设置不会自动开启已经查到的红包。
+  if (entry.claimMode !== 'direct') {
+    const lines = P.matchLines(packet).concat(P.line('等待手动开启', 'muted'));
+    entry.status = 'awaiting';
+    entry.lines = lines;
+    entry.result = P.linesText(lines);
+    await commit();
+    return { awaiting: true, lines };
+  }
+  return claimPacket(entry, packet);
+}
+
+/* --------------------------------- 队列 -------------------------------- */
+
+let timer = null;
+let executing = false;
+
+function queuedEntries() {
+  return state.entries.filter((entry) => entry.status === 'queued');
+}
+
+// 每条排队口令都保留计划开始时间：作废队首不会在时间表上留洞。
+function planQueue() {
+  const gap = gapMs();
+  let cursor = Math.max(Date.now(), state.lastStartedAt ? state.lastStartedAt + gap : 0);
+  for (const entry of state.entries) {
+    if (entry.status === 'running') {
+      cursor = Math.max(cursor, (entry.startedAt || Date.now()) + gap);
+      entry.scheduledAt = null;
+    } else if (entry.status === 'queued') {
+      entry.scheduledAt = cursor;
+      cursor += gap;
+    } else {
+      entry.scheduledAt = null;
+    }
+  }
+}
+
+function clearTimer() {
+  if (timer === null) return;
+  clearTimeout(timer);
+  timer = null;
+}
+
+async function syncAlarm() {
+  if (!api.alarms) return;
+  const pending = !state.paused && state.entries.some((entry) => entry.status === 'queued');
+  if (pending) {
+    await api.alarms.create(TICK_ALARM, { delayInMinutes: TICK_ALARM_MINUTES, periodInMinutes: TICK_ALARM_MINUTES });
+  } else {
+    await api.alarms.clear(TICK_ALARM);
+  }
+}
+
+async function tick() {
+  await getState();
+  clearTimer();
+  if (executing) return;
+  planQueue();
+  const next = state.entries.find((entry) => entry.status === 'queued');
+  if (state.paused || !next) {
+    await syncAlarm();
+    return;
+  }
+  const delay = Math.max(0, (next.scheduledAt || 0) - Date.now());
+  await syncAlarm();
+  if (delay > 0) {
+    timer = setTimeout(() => {
+      timer = null;
+      void tick();
+    }, Math.min(delay, WAIT_SLICE_MS));
+    return;
+  }
+  void executeEntry(next);
+}
+
+// 一条口令的终局：awaiting 停在等待点击，pause 表示不该让队列继续往下跑。
+async function settle(entry, outcome) {
+  entry.status = outcome.awaiting ? 'awaiting' : (outcome.pause ? 'failed' : 'done');
+  entry.lines = outcome.lines || null;
+  entry.result = P.linesText(entry.lines);
+  entry.finishedAt = outcome.awaiting ? null : Date.now();
+  entry.scheduledAt = null;
+  if (outcome.pause) {
+    state.paused = true;
+    state.pausedReason = entry.result;
+  }
+  await commit();
+}
+
+async function executeEntry(entry) {
+  executing = true;
+  entry.status = 'running';
+  entry.startedAt = Date.now();
+  entry.lines = [P.line('正在查询…', 'muted')];
+  entry.result = '';
+  await commit();
+
+  let outcome;
+  try {
+    outcome = await runEntry(entry);
+  } catch (error) {
+    outcome = {
+      lines: [P.line('查询失败: ' + (error instanceof Error ? error.message : '请求失败') + '。请手动再试。', 'error')],
+      pause: true,
+    };
+  }
+  executing = false;
+  await settle(entry, outcome);
+  if (!state.paused) void tick();
+}
+
+async function voidEntry(id) {
+  const entry = state.entries.find((candidate) => candidate.id === id);
+  if (!entry || !['queued', 'awaiting'].includes(entry.status)) return state;
+  entry.status = 'void';
+  entry.lines = [P.line('已作废', 'muted')];
+  entry.result = '已作废';
+  entry.finishedAt = Date.now();
+  entry.scheduledAt = null;
+  await commit();
+  await tick();
+  return state;
+}
+
+// 删除是把 id 打成墓碑：即使别处还留着旧副本，也不会把它写回来。
+async function deleteEntry(id) {
+  const entry = state.entries.find((candidate) => candidate.id === id);
+  if (!entry || entry.status === 'running' || claiming.has(id)) return state;
+  state.removed = state.removed.concat({ id, at: Date.now() });
+  state.entries = state.entries.filter((candidate) => candidate.id !== id);
+  await commit();
+  return state;
+}
+
+async function voidAllQueued() {
+  const queued = queuedEntries();
+  if (!queued.length) return state;
+  const stamp = Date.now();
+  for (const entry of queued) {
+    entry.status = 'void';
+    entry.lines = [P.line('已作废', 'muted')];
+    entry.result = '已作废';
+    entry.finishedAt = stamp;
+    entry.scheduledAt = null;
+  }
+  await commit();
+  await tick();
+  return state;
+}
+
+// 清空覆盖整份共享历史；正在领取或正在查询的条目留下，等它自己把结果写回。
+async function clearHistory() {
+  const stamp = Date.now();
+  const kept = [];
+  for (const entry of state.entries) {
+    if (entry.status === 'running' || claiming.has(entry.id)) {
+      kept.push(entry);
+      continue;
+    }
+    state.removed = state.removed.concat({ id: entry.id, at: stamp });
+  }
+  state.entries = kept;
+  await commit();
+  await tick();
+  return state;
+}
+
+async function resumeQueue() {
+  if (!state.paused) return state;
+  state.paused = false;
+  state.pausedReason = '';
+  await commit();
+  void tick();
+  return state;
+}
+
+/* ------------------------------- 消息处理 ------------------------------- */
+
+// 面板点一次“开”只发一条 hb:claim：面板负责校验真实点击（event.isTrusted），
+// 后台负责校验条目状态。状态在请求发出前就改掉，所以第二次点击必然被挡下。
+async function handleClaim(message) {
+  const id = typeof message?.id === 'string' ? message.id : '';
+  const entry = state.entries.find((candidate) => candidate.id === id);
+  if (!entry) return { ok: false, error: '该口令已清空或已在其他面板处理，未发送领取请求' };
+  if (message?.trusted !== true) return { ok: false, error: '缺少有效的领取授权，未发送领取请求' };
+  if (entry.status !== 'awaiting') return { ok: false, error: '领取模式或红包状态已改变，未发送领取请求' };
+  if (!entry.packet?.id || entry.claimMode !== 'manual') {
+    return { ok: false, error: '该口令没有可手动开启的红包，未发送领取请求' };
+  }
+  const outcome = await claimPacket(entry, entry.packet);
+  await settle(entry, outcome);
+  if (!state.paused) void tick();
+  return { ok: true, state: snapshot() };
+}
+
+async function handleSubmit(message) {
+  const claimMode = message?.claimMode === 'direct' ? 'direct' : 'manual';
+  const incoming = Array.isArray(message?.codes) ? message.codes : [];
+  const created = [];
+  for (const item of incoming) {
+    const code = typeof item?.code === 'string' ? item.code : '';
+    const charset = item?.charset === 'numeric' ? 'numeric' : 'text';
+    if (!code) continue;
+    // 面板已经清洗过，这里再校验一次，避免别的调用方塞进非法口令。
+    if (codes.validateCode(code, charset)) continue;
+    created.push({
+      id: createId(),
+      code,
+      charset,
+      claimMode,
+      packetId: null,
+      matched: false,
+      status: 'queued',
+      result: '',
+      lines: null,
+      packet: null,
+      createdAt: Date.now(),
+      startedAt: null,
+      finishedAt: null,
+      scheduledAt: null,
+    });
+  }
+  if (!created.length) return { ok: false, error: '没有可提交的有效口令' };
+  state.entries = state.entries.concat(created);
+  await commit();
+  void tick();
+  return { ok: true, added: created.length, state: snapshot() };
+}
+
+// 消息契约（扩展页面 → 后台）。
 // hb:ping         → { ok, version }
 // hb:state:get    → { ok, state }
-// hb:state:patch  → { ok, state }（patch 只接受 entries/removed 整体替换与 settings 合并）
-// hb:request      → 里程碑 3 实现（载荷 { codes: [{ code, charset }], claimMode }），
-//                   当前明确拒绝，避免面板误以为已经发出请求
+// hb:state:patch  → { ok, state }（settings 合并）
+// hb:submit       → { ok, added, state }（载荷 { codes: [{ code, charset }], claimMode }）
+// hb:claim        → { ok, state }（载荷 { id, trusted: true }，真实点击授权后的一次性领取）
+// hb:void / hb:delete / hb:clear / hb:void-all / hb:resume → { ok, state }
+// hb:session      → { ok, loggedIn, username }
 async function handleMessage(message) {
+  await getState();
   switch (message?.type) {
     case 'hb:ping':
       return { ok: true, version: VERSION };
     case 'hb:state:get':
-      return { ok: true, state: await loadState() };
-    case 'hb:state:patch':
-      return { ok: true, state: await patchState(message.patch || {}) };
-    case 'hb:request':
-      return { ok: false, error: '请求代理尚未实现（里程碑 3）' };
+      return { ok: true, state: snapshot() };
+    case 'hb:state:patch': {
+      const patch = isPlainObject(message.patch) ? message.patch : {};
+      if (isPlainObject(patch.settings)) {
+        state.settings = normalizeSettings({ ...state.settings, ...patch.settings });
+      }
+      await commit();
+      return { ok: true, state: snapshot() };
+    }
+    case 'hb:submit':
+      return handleSubmit(message);
+    case 'hb:claim':
+      return handleClaim(message);
+    case 'hb:void':
+      return { ok: true, state: await voidEntry(String(message.id || '')) };
+    case 'hb:delete':
+      return { ok: true, state: await deleteEntry(String(message.id || '')) };
+    case 'hb:void-all':
+      return { ok: true, state: await voidAllQueued() };
+    case 'hb:clear':
+      return { ok: true, state: await clearHistory() };
+    case 'hb:resume':
+      return { ok: true, state: await resumeQueue() };
+    case 'hb:session': {
+      const response = await siteRequest(P.sessionUrl(), 'GET');
+      const user = response.status === 200 ? response.response?.user : null;
+      return { ok: true, loggedIn: Boolean(user), username: user?.username || '' };
+    }
     default:
       return { ok: false, error: '未知消息：' + String(message?.type) };
   }
@@ -80,10 +625,22 @@ api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true; // 异步响应，必须保持消息通道打开
 });
 
-api.runtime.onInstalled.addListener(() => loadState().then((state) => {
+api.runtime.onInstalled.addListener(() => {
   // 首次安装写入默认配置，面板据此渲染；重复安装不覆盖用户配置。
-  return api.storage.local.get(STATE_KEY).then((stored) => {
-    if (isPlainObject(stored?.[STATE_KEY])) return undefined;
-    return api.storage.local.set({ [STATE_KEY]: state });
-  });
-}));
+  return api.storage.local.get(STATE_KEY).then((bag) => {
+    if (isPlainObject(bag?.[STATE_KEY])) return undefined;
+    return api.storage.local.set({ [STATE_KEY]: emptyState() });
+  }).then(() => tick());
+});
+
+api.runtime.onStartup?.addListener(() => {
+  void tick();
+});
+
+api.alarms?.onAlarm.addListener((alarm) => {
+  if (alarm?.name === TICK_ALARM) void tick();
+});
+
+// worker 每次被唤醒都可能是在队列中途：先载入状态，把该跑的接着跑。
+void tick();
+

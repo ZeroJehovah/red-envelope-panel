@@ -41,7 +41,29 @@
               notify();
               return { ok: true, state };
             }
-            if (message.type === 'hb:request') return { ok: false, error: '请求代理尚未实现（里程碑 3）' };
+            if (message.type === 'hb:submit') {
+              for (const item of message.codes || []) {
+                state.entries.push({
+                  id: 'harness-' + (state.entries.length + 1),
+                  code: item.code,
+                  charset: item.charset,
+                  claimMode: message.claimMode,
+                  status: 'queued',
+                  result: '',
+                  lines: null,
+                  packetId: null,
+                  matched: false,
+                  createdAt: 1,
+                });
+              }
+              notify();
+              return { ok: true, added: (message.codes || []).length, state };
+            }
+            if (message.type === 'hb:claim') return { ok: true, state };
+            if (message.type === 'hb:session') return { ok: true, loggedIn: true, username: 'harness' };
+            if (['hb:void', 'hb:delete', 'hb:void-all', 'hb:clear', 'hb:resume'].includes(message.type)) {
+              return { ok: true, state };
+            }
             return { ok: false, error: '未知消息：' + String(message.type) };
           },
         },
@@ -121,10 +143,40 @@
           document.getElementById('hb-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
           await tick();
           await tick();
-          const request = sent.find((message) => message.type === 'hb:request');
+          const request = sent.find((message) => message.type === 'hb:submit');
           check('提交把两条口令交给后台', Boolean(request) && request.codes.length === 2,
             JSON.stringify(request && request.codes));
-          check('提交结果如实回报未实现', /请求代理尚未实现/.test(hint().textContent), hint().textContent);
+          check('提交成功后清空草稿', textarea().value === '', textarea().value);
+          check('入队口令渲染成历史行',
+            document.querySelectorAll('#hb-list .hb-row').length === 2,
+            String(document.querySelectorAll('#hb-list .hb-row').length));
+          check('排队中的行给出作废按钮',
+            document.querySelectorAll('#hb-list .hb-row button[data-action="void"]').length === 2);
+
+          // 补一条等待点击的条目：面板要给出开启按钮，但合成点击不算真实点击。
+          state.entries.push({
+            id: 'awaiting-1',
+            code: '11775521',
+            charset: 'numeric',
+            claimMode: 'manual',
+            status: 'awaiting',
+            result: '等待手动开启',
+            lines: [{ text: '等待手动开启', tone: 'muted' }],
+            packet: { id: '77' },
+            packetId: '77',
+            matched: true,
+            createdAt: 2,
+          });
+          notify();
+          await tick();
+          await tick();
+          const open = document.querySelector('#hb-list .hb-row[data-id="awaiting-1"] button[data-action="claim"]');
+          check('待开启条目出现开红包按钮', Boolean(open));
+          if (open) click(open);
+          await tick();
+          check('合成点击不授权领取（isTrusted 校验）',
+            !sent.some((message) => message.type === 'hb:claim'),
+            JSON.stringify(sent.filter((message) => message.type === 'hb:claim')));
 
           click(document.querySelector('[data-switch="batch"]'));
           await tick();

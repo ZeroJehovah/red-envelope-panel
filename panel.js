@@ -64,17 +64,24 @@
         <span class="hb-count" id="hb-count">0/18</span>
       </div>
     </form>
-    <section class="hb-card">
+    <section class="hb-card" id="hb-queue">
       <div class="hb-stats">
         <span class="hb-stat"><b id="hb-count-entries">0</b> 条口令</span>
         <span class="hb-stat"><b id="hb-count-waiting">0</b> 等待中</span>
         <span class="hb-stat"><b id="hb-count-done">0</b> 已完成</span>
       </div>
+      <p class="hb-paused" id="hb-paused" hidden></p>
       <ul class="hb-list" id="hb-list"></ul>
       <p class="hb-empty" id="hb-empty">队列为空，输入口令后点「拆红包」。</p>
+      <div class="hb-queue-actions">
+        <button type="button" class="hb-row-button" id="hb-resume" hidden>继续队列</button>
+        <button type="button" class="hb-row-button" id="hb-void-all" hidden>全部作废</button>
+        <button type="button" class="hb-row-button" id="hb-clear" hidden>清空历史</button>
+      </div>
     </section>
     <section class="hb-card hb-meta" id="hb-meta"></section>
     <section class="hb-actions">
+      <button type="button" class="hb-button" id="hb-session">检查登录</button>
       <button type="button" class="hb-button hb-button--primary" id="hb-open-sidebar" hidden>在侧边栏常显</button>
       <button type="button" class="hb-button" id="hb-open-site"></button>
     </section>
@@ -256,7 +263,6 @@
     }
   }
 
-  // 领取链路要等里程碑 3 的请求代理；失败提示保持直白，不假装已经发出请求。
   async function submitDraft(hint) {
     const field = activeField();
     const list = field ? codes.parseCodes(field.value, settings.charset, settings.batch === true) : [];
@@ -271,13 +277,18 @@
     }
     try {
       const response = await api.runtime.sendMessage({
-        type: 'hb:request',
+        type: 'hb:submit',
         codes: list,
         claimMode: settings.claimMode,
       });
-      hint.textContent = response?.ok
-        ? '已提交 ' + list.length + ' 条口令。'
-        : '提交未完成：' + (response?.error || '未知错误');
+      if (!response?.ok) {
+        hint.textContent = '提交未完成：' + (response?.error || '未知错误');
+        return;
+      }
+      // 入队成功后清空草稿，队列状态由 storage 变更推回面板。
+      if (field) field.value = '';
+      syncDraft();
+      hint.textContent = '已加入队列 ' + response.added + ' 条口令。';
     } catch (error) {
       hint.textContent = '后台暂不可用：' + String(error?.message || error);
     }
@@ -285,14 +296,13 @@
 
   function renderMeta(state) {
     const meta = document.getElementById('hb-meta');
-    const settings = state.settings || {};
+    const conf = state.settings || {};
     const rows = [
-      ['输入模式', settings.batch ? '批量（每行一条）' : '单个'],
-      ['口令类型', CHARSET_LABEL[settings.charset] || CHARSET_LABEL.text],
-      ['领取方式', CLAIM_MODE_LABEL[settings.claimMode] || CLAIM_MODE_LABEL.manual],
-      ['请求间隔', (5 + Math.max(0, Number(settings.gapExtraMs) || 0) / 1000).toFixed(1) + ' 秒起'],
+      ['输入模式', conf.batch ? '批量（每行一条）' : '单个'],
+      ['口令类型', CHARSET_LABEL[conf.charset] || CHARSET_LABEL.text],
+      ['请求间隔', (5 + Math.max(0, Number(conf.gapExtraMs) || 0) / 1000).toFixed(1) + ' 秒起'],
     ];
-    meta.replaceChildren(...rows.map(([label, value]) => {
+    const nodes = rows.map(([label, value]) => {
       const row = document.createElement('div');
       row.className = 'hb-meta-row';
       const key = document.createElement('span');
@@ -303,42 +313,129 @@
       val.textContent = value;
       row.append(key, val);
       return row;
-    }));
+    });
+
+    // 领取方式可切换：古法停在等待点击，协议由后台直接领取。
+    const modeRow = document.createElement('div');
+    modeRow.className = 'hb-meta-row';
+    const modeLabel = document.createElement('span');
+    modeLabel.className = 'hb-meta-label';
+    modeLabel.textContent = '领取方式';
+    const switcher = document.createElement('div');
+    switcher.className = 'hb-switch';
+    switcher.dataset.switch = 'claimMode';
+    switcher.setAttribute('role', 'switch');
+    switcher.setAttribute('aria-checked', String(settings.claimMode === 'direct'));
+    switcher.title = CLAIM_MODE_LABEL[settings.claimMode] || CLAIM_MODE_LABEL.manual;
+    for (const [value, label] of [['manual', '古法'], ['direct', '协议']]) {
+      const option = document.createElement('span');
+      option.className = 'hb-switch-option' + (settings.claimMode === value ? ' is-active' : '');
+      option.dataset.value = value;
+      option.textContent = label;
+      switcher.append(option);
+    }
+    modeRow.append(modeLabel, switcher);
+    nodes.push(modeRow);
+    meta.replaceChildren(...nodes);
   }
 
-  function renderList(state) {
+  const TONE_CLASS = { normal: 'hb-line--normal', success: 'hb-line--success', error: 'hb-line--error', muted: 'hb-line--muted' };
+
+  function stampText(timestamp) {
+    const date = new Date(Number(timestamp) || 0);
+    const pad = (value) => String(value).padStart(2, '0');
+    return pad(date.getHours()) + ':' + pad(date.getMinutes());
+  }
+
+  // 一条历史能给的动作：等待点击的开、排队中的作废、已完结的删除；执行中不给动作。
+  function actionFor(entry) {
+    if (entry.status === 'awaiting' && entry.claimMode === 'manual') return { action: 'claim', label: '开红包', primary: true };
+    if (entry.status === 'queued') return { action: 'void', label: '作废' };
+    if (entry.status === 'running') return null;
+    return { action: 'delete', label: '删除' };
+  }
+
+  function renderQueue(state) {
     const entries = Array.isArray(state.entries) ? state.entries : [];
-    const waiting = entries.filter((entry) => entry.status !== 'done' && entry.status !== 'failed' && entry.status !== 'void').length;
+    const waiting = entries.filter((entry) => ['queued', 'awaiting', 'running'].includes(entry.status)).length;
     const done = entries.filter((entry) => entry.status === 'done').length;
     text('#hb-count-entries', String(entries.length));
     text('#hb-count-waiting', String(waiting));
     text('#hb-count-done', String(done));
 
+    const paused = state.paused === true;
+    const pausedNode = document.getElementById('hb-paused');
+    pausedNode.hidden = !paused;
+    pausedNode.textContent = paused ? '队列已暂停：' + (state.pausedReason || '上一条未成功，请核对后继续。') : '';
+
     const list = document.getElementById('hb-list');
-    const recent = entries.slice(-3).reverse();
-    // 口令是外部输入，只作为文本节点写入，不参与 DOM 结构。
-    list.replaceChildren(...recent.map((entry) => {
+    // 新条目在上；口令与结果都是外部输入，只作为文本节点写入。
+    const ordered = entries.slice().reverse();
+    list.replaceChildren(...ordered.map((entry) => {
       const item = document.createElement('li');
       item.className = 'hb-row';
+      item.dataset.id = entry.id;
+
+      const head = document.createElement('div');
+      head.className = 'hb-row-head';
       const code = document.createElement('code');
       code.className = 'hb-code';
       code.textContent = String(entry.code || '（无口令）');
       const status = document.createElement('span');
       status.className = 'hb-status ' + (STATUS_CLASS[entry.status] || 'hb-status--idle');
       status.textContent = STATUS_LABEL[entry.status] || '未知';
-      item.append(code, status);
+      head.append(code, status);
+      item.append(head);
+
+      const lines = Array.isArray(entry.lines) ? entry.lines : [];
+      const resultText = lines.length ? '' : String(entry.result || '');
+      if (lines.length || resultText) {
+        const result = document.createElement('p');
+        result.className = 'hb-row-result';
+        const items = lines.length
+          ? lines.map((line) => ({ text: line.text, tone: line.tone }))
+          : [{ text: resultText, tone: 'muted' }];
+        result.append(...items.map(({ text: content, tone }) => {
+          const span = document.createElement('span');
+          span.className = 'hb-line ' + (TONE_CLASS[tone] || TONE_CLASS.normal);
+          span.textContent = String(content);
+          return span;
+        }));
+        item.append(result);
+      }
+
+      const foot = document.createElement('div');
+      foot.className = 'hb-row-head';
+      const time = document.createElement('span');
+      time.className = 'hb-row-time';
+      time.textContent = stampText(entry.createdAt);
+      foot.append(time);
+      const action = actionFor(entry);
+      if (action) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'hb-row-button' + (action.primary ? ' hb-row-button--primary' : '');
+        button.dataset.action = action.action;
+        button.textContent = action.label;
+        foot.append(button);
+      }
+      item.append(foot);
       return item;
     }));
-    list.hidden = recent.length === 0;
-    document.getElementById('hb-empty').textContent = recent.length
-      ? ''
-      : '队列为空，输入口令后点「拆红包」。';
-    document.getElementById('hb-empty').hidden = recent.length > 0;
+
+    list.hidden = ordered.length === 0;
+    const empty = document.getElementById('hb-empty');
+    empty.hidden = ordered.length > 0;
+    empty.textContent = '队列为空，输入口令后点「拆红包」。';
+
+    document.getElementById('hb-resume').hidden = !paused;
+    document.getElementById('hb-void-all').hidden = !entries.some((entry) => entry.status === 'queued');
+    document.getElementById('hb-clear').hidden = ordered.length === 0;
   }
 
   function render(state) {
     renderInput(state);
-    renderList(state);
+    renderQueue(state);
     renderMeta(state);
   }
 
@@ -390,6 +487,55 @@
     siteButton.textContent = '打开 ' + SITE_LABEL;
     siteButton.addEventListener('click', () => {
       api.tabs.create({ url: SITE_URL });
+    });
+
+    const send = (message, okText) => api.runtime.sendMessage(message).then((response) => {
+      hint.textContent = response?.ok ? (okText || '') : (response?.error || '操作未完成');
+      return response;
+    }, (error) => {
+      hint.textContent = '后台暂不可用：' + String(error?.message || error);
+      return undefined;
+    });
+
+    // 队列动作都交给后台：面板只发消息，状态经 storage 变更回流后重绘。
+    document.getElementById('hb-resume').addEventListener('click', () => send({ type: 'hb:resume' }, ''));
+    document.getElementById('hb-void-all').addEventListener('click', () => send({ type: 'hb:void-all' }, ''));
+    document.getElementById('hb-clear').addEventListener('click', () => send({ type: 'hb:clear' }, ''));
+
+    document.getElementById('hb-session').addEventListener('click', async () => {
+      hint.textContent = '正在确认红包站登录状态…';
+      const response = await send({ type: 'hb:session' }, '');
+      if (!response?.ok) return;
+      hint.textContent = response.loggedIn
+        ? '已登录红包站：' + response.username
+        : '未检测到红包站登录状态，请打开 ' + SITE_LABEL + ' 登录后再试。';
+    });
+
+    document.getElementById('hb-meta').addEventListener('click', (event) => {
+      if (!event.target.closest('[data-switch="claimMode"]')) return;
+      const next = settings.claimMode === 'direct' ? 'manual' : 'direct';
+      patchSettings({ claimMode: next }, hint);
+      hint.textContent = next === 'direct'
+        ? '新的口令会由后台直接领取。'
+        : '新的口令会停在「待开启」，由你在面板上点击开启。';
+    });
+
+    // 历史行的动作走事件委托：行元素每次渲染都会重建。
+    document.getElementById('hb-list').addEventListener('click', (event) => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      const id = button.closest('.hb-row')?.dataset.id;
+      if (!id) return;
+      const action = button.dataset.action;
+      // 领取是写操作：只认真实点击（后台还会校验条目状态），一次点击只放行一条请求。
+      if (action === 'claim' && !event.isTrusted) return;
+      const message = action === 'claim'
+        ? { type: 'hb:claim', id, trusted: true }
+        : (action === 'void' ? { type: 'hb:void', id } : { type: 'hb:delete', id });
+      button.disabled = true;
+      send(message, action === 'claim' ? '领取请求已发出，结果以红包站为准。' : '').then((response) => {
+        if (!response?.ok) button.disabled = false;
+      });
     });
 
     const form = document.getElementById('hb-form');
