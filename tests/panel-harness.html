@@ -23,10 +23,15 @@
       // 最小 chrome API 替身：只回放面板用到的消息契约。
       const sent = [];
       const listeners = [];
+      const sidePanelOpens = [];
+      let closeCalls = 0;
+      window.close = () => { closeCalls += 1; };
       const state = {
         entries: [],
         removed: [],
-        settings: { charset: 'text', batch: false, claimMode: 'manual', gapExtraMs: 0 },
+        settings: { charset: 'text', batch: false, claimMode: 'manual', gapExtraMs: 0, display: 'panel' },
+        paused: false,
+        pausedReason: '',
       };
       // 后台真实行为是「写 storage → storage.onChanged → 所有面板重渲染」，替身照做一遍。
       const notify = () => listeners.forEach((listener) => listener({ 'hb-state-v1': { newValue: state } }, 'local'));
@@ -72,7 +77,11 @@
                   lines: null,
                   packetId: null,
                   matched: false,
+                  packet: null,
                   createdAt: 1,
+                  startedAt: null,
+                  finishedAt: null,
+                  scheduledAt: Date.now() + 5000,
                 });
               }
               notify();
@@ -90,6 +99,11 @@
             if (message.type === 'hb:packet') return { ok: true, packet: packetDetails[message.id] || null };
             if (message.type === 'hb:session') return { ok: true, loggedIn: true, username: 'harness', linuxdo_id: 9 };
             if (['hb:void', 'hb:delete', 'hb:void-all', 'hb:clear', 'hb:resume'].includes(message.type)) {
+              if (message.type === 'hb:resume') {
+                state.paused = false;
+                state.pausedReason = '';
+                notify();
+              }
               return { ok: true, state };
             }
             return { ok: false, error: '未知消息：' + String(message.type) };
@@ -98,7 +112,7 @@
         storage: { onChanged: { addListener: (listener) => listeners.push(listener) } },
         tabs: { create: () => {} },
         windows: { getCurrent: async () => ({ id: 1 }) },
-        sidePanel: { open: async () => {} },
+        sidePanel: { open: async (options) => { sidePanelOpens.push(options); } },
       };
     </script>
     <script src="browser-shim.js"></script>
@@ -119,6 +133,10 @@
         const submit = () => document.getElementById('hb-submit');
         const counter = () => document.getElementById('hb-count');
         const hint = () => document.getElementById('hb-hint');
+        const config = () => document.getElementById('hb-config');
+        const gap = () => document.getElementById('hb-gap');
+        const row = (id) => document.querySelector('#hb-list .hb-entry[data-id="' + id + '"]');
+        const rows = () => document.querySelectorAll('#hb-list .hb-entry');
         const click = (node) => node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         const type = (field, value) => {
           field.value = value;
@@ -132,44 +150,82 @@
         const TICK = String.fromCharCode(96);
         const share = (code) => '我向你分享了一个LDC红包，打开 ' + TICK + 'hb.unsnow.org' + TICK
           + ' ，输入口令 ' + TICK + code + TICK + ' 领取';
+        const host = () => document.getElementById('hb-envelope-host');
+        const card = () => host() && host().shadowRoot && host().shadowRoot.querySelector('.redpacket-envelope');
+        const inCard = (selector) => (card() ? card().querySelector(selector) : null);
 
         try {
-          globalThis.HBPanel.mount(document.getElementById('app'), { allowSidePanelOpen: true });
+          globalThis.HBPanel.mount(document.getElementById('app'), { shell: 'popup' });
           await tick();
           await tick();
 
+          // 输入区与草稿。
           check('面板渲染出输入框', Boolean(input()) && input().hidden === false);
           check('批量输入框初始隐藏', textarea().hidden === true);
           check('初始计数 0/18', counter().textContent === '0/18', counter().textContent);
           check('空草稿禁用提交', submit().disabled === true);
-
           type(input(), '  新年 快乐发财 ');
           check('输入即时清洗', input().value === '新年快乐发财', input().value);
           check('计数跟随草稿', counter().textContent === '6/18', counter().textContent);
           check('合法口令启用提交', submit().disabled === false);
-
           input().value = '';
           paste(input(), share('11775521'));
           check('粘贴分享文案只留口令', input().value === '11775521', input().value);
 
+          // 头部两个开关。
           click(document.querySelector('[data-switch="charset"]'));
           await tick();
           check('切到数字模式', document.querySelector('[data-switch="charset"]').getAttribute('aria-checked') === 'true');
           check('数字模式占位提示', input().placeholder === '8 位数字（0–9）', input().placeholder);
           check('设置改动写入后台',
             sent.some((message) => message.type === 'hb:state:patch' && message.patch.settings.charset === 'numeric'));
-
           type(input(), '1177552199x');
           check('数字模式按 8 位截断', input().value === '11775521', input().value);
-
           click(document.querySelector('[data-switch="batch"]'));
           await tick();
           check('切到批量模式', textarea().hidden === false && input().hidden === true);
           check('草稿搬到批量输入框', textarea().value === '11775521', textarea().value);
 
+          // 配置面板（脚本版里齿轮按钮展开的那块）。
+          check('配置面板初始收起', config().hidden === true);
+          click(document.getElementById('hb-config-toggle'));
+          await tick();
+          check('点齿轮展开配置面板', config().hidden === false
+            && document.getElementById('hb-config-toggle').getAttribute('aria-expanded') === 'true');
+          check('配置面板显示扩展版本号',
+            document.getElementById('hb-config-version').textContent === 'vharness',
+            document.getElementById('hb-config-version').textContent);
+          check('领取方式默认古法',
+            document.querySelector('[data-switch="claimMode"]').getAttribute('aria-checked') === 'false');
+          click(document.querySelector('[data-switch="claimMode"]'));
+          await tick();
+          check('领取方式可切到协议', document.querySelector('[data-switch="claimMode"]').getAttribute('aria-checked') === 'true'
+            && sent.some((message) => message.type === 'hb:state:patch' && message.patch.settings.claimMode === 'direct'));
+          check('间隔时间显示基础 5000+',
+            /5000\+/.test(config().textContent), config().textContent.slice(0, 40));
+          check('间隔时间输入框回填当前加时', gap().value === '0', gap().value);
+          type(gap(), '2500');
+          await tick();
+          check('间隔时间写入后台',
+            sent.some((message) => message.type === 'hb:state:patch' && message.patch.settings.gapExtraMs === 2500));
+          type(gap(), '99999');
+          await tick();
+          check('间隔时间按上限夹紧',
+            sent.some((message) => message.type === 'hb:state:patch' && message.patch.settings.gapExtraMs === 60000));
+          type(gap(), '0');
+          await tick();
+          check('显示方式默认悬浮',
+            document.querySelector('[data-switch="display"]').getAttribute('aria-checked') === 'false');
+          click(document.querySelector('[data-switch="display"]'));
+          await tick();
+          check('悬浮切停靠会打开侧边栏并收起面板',
+            sidePanelOpens.length === 1 && closeCalls === 1
+            && sent.some((message) => message.type === 'hb:state:patch' && message.patch.settings.display === 'sidebar'));
+
+          // 队列与历史。
+          check('作废队列在没有排队口令时禁用', document.getElementById('hb-void-all').disabled === true);
           paste(textarea(), share('11775521') + '\n' + share('87654321'));
           check('批量粘贴逐行取出口令', textarea().value === '11775521\n87654321', textarea().value);
-
           document.getElementById('hb-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
           await tick();
           await tick();
@@ -177,17 +233,34 @@
           check('提交把两条口令交给后台', Boolean(request) && request.codes.length === 2,
             JSON.stringify(request && request.codes));
           check('提交成功后清空草稿', textarea().value === '', textarea().value);
-          check('入队口令渲染成历史行',
-            document.querySelectorAll('#hb-list .hb-row').length === 2,
-            String(document.querySelectorAll('#hb-list .hb-row').length));
-          check('排队中的行给出作废按钮',
-            document.querySelectorAll('#hb-list .hb-row button[data-action="void"]').length === 2);
+          check('入队口令渲染成历史行', rows().length === 2, String(rows().length));
+          check('历史头显示条数与排队数',
+            /口令历史（2 条 · 排队 2 条）/.test(document.getElementById('hb-history-label').textContent),
+            document.getElementById('hb-history-label').textContent);
+          check('作废队列在有排队口令时可用', document.getElementById('hb-void-all').disabled === false);
+          check('排队行给出作废按钮', document.querySelectorAll('#hb-list button[data-action="void"]').length === 2);
+          check('排队行显示预计开始时间',
+            /^预计 \d\d:\d\d:\d\d$/.test(document.querySelector('#hb-list .hb-entry-time').textContent),
+            document.querySelector('#hb-list .hb-entry-time').textContent);
+          check('排队行结果写「排队中」',
+            document.querySelector('#hb-list .hb-entry-line').textContent === '排队中',
+            document.querySelector('#hb-list .hb-entry-line').textContent);
+
+          // 点口令填入输入框（脚本版历史行的核心交互）。
+          click(row('harness-1').querySelector('.hb-entry-code'));
+          check('批量模式下点口令追加一行', textarea().value === '11775521', textarea().value);
+          click(row('harness-2').querySelector('.hb-entry-code'));
+          check('批量模式下再点一条继续追加', textarea().value === '11775521\n87654321', textarea().value);
+          click(document.querySelector('[data-switch="batch"]'));
+          await tick();
+          textarea().value = '';
+          type(input(), 'x');
+          click(row('harness-1').querySelector('.hb-entry-code'));
+          check('单个模式下点口令替换草稿', input().value === '11775521', input().value);
+          check('填入后计数跟着走', counter().textContent === '8/8', counter().textContent);
+          input().value = '';
 
           // 普通红包：先用历史快照出卡片，再补上只读详情；写入只能由卡片上的真实点击触发。
-          const host = () => document.getElementById('hb-envelope-host');
-          const card = () => host() && host().shadowRoot && host().shadowRoot.querySelector('.redpacket-envelope');
-          const inCard = (selector) => (card() ? card().querySelector(selector) : null);
-
           state.entries.push({
             id: 'awaiting-1',
             code: '11775521',
@@ -204,12 +277,15 @@
           notify();
           await tick();
           await tick();
-          const open = document.querySelector('#hb-list .hb-row[data-id="awaiting-1"] button[data-action="open"]');
-          check('待开启条目出现开红包按钮', Boolean(open) && open.textContent === '开红包', open && open.textContent);
+          const open = row('awaiting-1').querySelector('button[data-action="open"]');
+          check('待开启条目出现红包详情按钮', Boolean(open), open && open.className);
+          check('待开启的时间列显示「待开启」',
+            row('awaiting-1').querySelector('.hb-entry-time').textContent === '待开启',
+            row('awaiting-1').querySelector('.hb-entry-time').textContent);
           if (open) click(open);
           await tick();
           await tick();
-          check('点开红包弹出信封卡片', Boolean(card()));
+          check('点红包图标弹出信封卡片', Boolean(card()));
           check('卡片显示发件人与红包口令',
             inCard('#env-sender-name') && inCard('#env-sender-name').textContent === '来自 alice 的红包'
             && inCard('#env-footer-code') && inCard('#env-footer-code').textContent === '11775521',
@@ -239,8 +315,7 @@
           });
           notify();
           await tick();
-          const view = document.querySelector('#hb-list .hb-row[data-id="done-1"] button[data-action="open"]');
-          check('已完结条目给出查看按钮', Boolean(view) && view.textContent === '查看', view && view.textContent);
+          const view = row('done-1').querySelector('button[data-action="open"]');
           if (view) click(view);
           await tick();
           await tick();
@@ -253,6 +328,12 @@
             Boolean(inCard('#env-claims-list')) && inCard('#env-claims-list').querySelectorAll('.envelope-claim-row').length === 1);
           check('历史卡片收起封口视图',
             Boolean(inCard('#envelope-closed-view')) && inCard('#envelope-closed-view').style.display === 'none');
+          check('卡片只有一层外壳',
+            Boolean(card()) && card().querySelectorAll('.redpacket-envelope').length === 0
+            && Boolean(card().parentElement) && card().parentElement.classList.contains('modal-overlay'));
+          check('已完结行只给删除动作',
+            Boolean(row('done-1').querySelector('button[data-action="delete"]'))
+            && !row('done-1').querySelector('button[data-action="void"]'));
 
           // 抽奖红包：没报名时给「参与抽选」，报名之后只剩等待开奖。
           const lotteryRow = {
@@ -271,11 +352,9 @@
           state.entries.push(lotteryRow);
           notify();
           await tick();
-          const lotteryButton = document.querySelector('#hb-list .hb-row[data-id="lottery-1"] button[data-action="open"]');
-          check('抽奖待参与条目的按钮是「参与抽选」',
-            Boolean(lotteryButton) && lotteryButton.textContent === '参与抽选',
-            lotteryButton && lotteryButton.textContent);
-          if (lotteryButton) click(lotteryButton);
+          if (row('lottery-1').querySelector('button[data-action="open"]')) {
+            click(row('lottery-1').querySelector('button[data-action="open"]'));
+          }
           await tick();
           await tick();
           check('抽奖卡片显示倒计时',
@@ -287,14 +366,16 @@
             Boolean(inCard('#lottery-join')) && inCard('#lottery-join').hidden === false);
 
           lotteryRow.packet = { id: 'hp2', type: 'lottery', joined: true, code: '11775521', creator: { username: 'alice', linuxdo_id: 1 } };
+          lotteryRow.lines = [{ text: '已参与抽选，等待开奖', tone: 'success' }];
           packetDetails.hp2 = Object.assign({}, packetDetails.hp2, { joined: true });
           notify();
           await tick();
-          const lotteryChip = document.querySelector('#hb-list .hb-row[data-id="lottery-1"] .hb-status');
-          check('已报名的抽奖显示等待开奖', Boolean(lotteryChip) && lotteryChip.textContent === '等待开奖',
-            lotteryChip && lotteryChip.textContent);
-          const reopen = document.querySelector('#hb-list .hb-row[data-id="lottery-1"] button[data-action="open"]');
-          if (reopen) click(reopen);
+          check('已报名的抽奖行结果写等待开奖',
+            row('lottery-1').querySelector('.hb-entry-line').textContent === '已参与抽选，等待开奖',
+            row('lottery-1').querySelector('.hb-entry-line').textContent);
+          if (row('lottery-1').querySelector('button[data-action="open"]')) {
+            click(row('lottery-1').querySelector('button[data-action="open"]'));
+          }
           await tick();
           await tick();
           check('已报名的抽奖卡片不再给参与按钮',
@@ -302,11 +383,25 @@
           check('报名之后行上不再给写入动作',
             document.querySelectorAll('#hb-list button[data-action="claim"]').length === 0);
 
-
-          click(document.querySelector('[data-switch="batch"]'));
+          // 暂停横幅：文案来自后台，恢复按钮留在横幅里。
+          state.paused = true;
+          state.pausedReason = '领取失败: 已领取';
+          notify();
           await tick();
+          const banner = document.getElementById('hb-paused');
+          check('暂停横幅显示原因', banner.hidden === false
+            && document.getElementById('hb-paused-text').textContent === '执行已暂停：领取失败: 已领取',
+            document.getElementById('hb-paused-text').textContent);
+          check('排队行在暂停时改显示「待执行」',
+            row('harness-2').querySelector('.hb-entry-time').textContent === '待执行',
+            row('harness-2').querySelector('.hb-entry-time').textContent);
+          click(document.getElementById('hb-resume'));
+          await tick();
+          check('点恢复执行发 hb:resume', sent.some((message) => message.type === 'hb:resume'));
+
           click(document.querySelector('[data-switch="charset"]'));
           await tick();
+          check('数字模式可切回文本', document.querySelector('[data-switch="charset"]').getAttribute('aria-checked') === 'false');
           type(input(), 'abc12');
           check('短口令禁用提交', submit().disabled === true && /不足 6 个字符/.test(submit().title), submit().title);
         } catch (error) {
@@ -320,3 +415,4 @@
     </script>
   </body>
 </html>
+

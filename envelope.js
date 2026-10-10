@@ -22,7 +22,9 @@
   const HOST_ID = 'hb-envelope-host';
   const POLL_INTERVAL_MS = 4000;   // 卡片开着时的刷新节奏；后台限速会让它不会更密
 
-  const ENVELOPE_MARKUP = `<div class="redpacket-envelope">
+  // 这里只放卡片「里面」的两块视图：卡片本体由 createNode 建出来，class 已经在了，
+  // 若这里再套一层 .redpacket-envelope，卡片的 padding、圆角与 520px 定高会叠两遍。
+  const ENVELOPE_MARKUP = `
       <!-- 封口（未开启）视图 -->
       <div id="envelope-closed-view" style="display: flex; flex-direction: column; align-items: center; justify-content: space-between; height: 100%; width: 100%;">
           <div class="envelope-top">
@@ -53,8 +55,7 @@
         </div>
         <div class="envelope-claims-list" id="env-claims-list"></div>
         <button class="envelope-close-btn">确定</button>
-      </div>
-    </div>`;
+      </div>`;
 
   const LOTTERY_MARKUP = `<section id="lottery-view" class="lottery-view" hidden aria-labelledby="lottery-title">
         <header class="lottery-header">

@@ -1,97 +1,144 @@
 /* 弹出面板与常显侧边栏共用的渲染器。
  *
- * 两个外壳只提供不同的 <body> 尺寸类，渲染、输入、状态订阅与入口按钮都在这里，
- * 避免两套面板各写一遍。口令清洗与校验规则在 code-rules.js（移植自脚本版）。
+ * 结构与脚本版 browser/userscripts/linuxdo-hongbao-code-sidebar.user.js（v2.35.0）的
+ * ensurePanel() 一一对应：头部两个开关（单个/批量、文本/数字）与三个图标按钮（打开红包站、
+ * 配置、收起）、可折叠的配置面板（领取方式、间隔时间、显示方式、版本号）、正文里的输入框与
+ * 批量文本域、「拆红包」与字数提示、暂停横幅里的「恢复执行」，以及「口令历史（N 条 · 排队 M 条）」
+ * 加作废队列/清空历史的图标按钮与逐行（时间、数字标记、点击口令填入输入框、红包详情图标、作废/删除）。
+ *
+ * 形态差异（记录在 docs/AGENTS.md）：
+ *   - 脚本版的悬浮窗口对应点扩展图标弹出的面板，停靠列对应浏览器常显侧边栏；「显示方式」开关在
+ *     弹出面板里切到「停靠」会直接打开侧边栏并收起弹出面板；
+ *   - 「收起」按钮只在弹出面板出现（侧边栏由浏览器自己收起）；
+ *   - 面板不注入页面，脚本版的拖拽与八向缩放没有对应物（窗口由浏览器管）；
+ *   - 配置面板的展开状态只活在本次会话，不写进 hb-state-v1。
  */
 'use strict';
 
 (function () {
   const api = globalThis.HBApi;
+  const P = globalThis.HBProtocol;
+  // 口令清洗与校验规则在 code-rules.js，与脚本版逐字符一致。
+  const codes = globalThis.HBCodes;
+  // 红包详情卡片（envelope.js + envelope.css）：挂在面板自己的影子 DOM 里，一次一张。
+  const envelope = globalThis.HBEnvelope;
   const VERSION = api.runtime.getManifest().version;
   const STATE_KEY = 'hb-state-v1';
   // 面板与站点无关：入口只有扩展图标与浏览器侧边栏，红包站只作为登录与核对记录的跳转目标。
   const SITE_URL = 'https://hb.unsnow.org/';
   const SITE_LABEL = 'hb.unsnow.org';
 
-  const STATUS_LABEL = {
-    queued: '排队中',
-    awaiting: '待开启',
-    running: '执行中',
-    done: '已完成',
-    failed: '失败',
-    void: '已作废',
+  // 图标全部内联随包（MV3 CSP 不允许远程资源），path 与脚本版同一组。
+  const ICON_PATHS = {
+    gear: 'M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z',
+    close: 'M18 6 6 18 M6 6l12 12',
+    external: 'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14 21 3',
+    ban: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20 M4.93 4.93 19.07 19.07',
+    trash: 'M3 6h18 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M10 11v6 M14 11v6',
   };
-  const STATUS_CLASS = {
-    queued: 'hb-status--idle',
-    awaiting: 'hb-status--gold',
-    running: 'hb-status--gold',
-    done: 'hb-status--green',
-    failed: 'hb-status--red',
-    void: 'hb-status--muted',
-  };
-  const CLAIM_MODE_LABEL = { manual: '古法（手动开启）', direct: '协议（直接领取）' };
-  const CHARSET_LABEL = { text: '文本口令', numeric: '数字口令' };
+  // 红包行图标沿用脚本版的红包字形：两片填充轮廓加一枚封口金。
+  const PACKET_ICON_PATHS = [
+    'M925.888 76.8v400.96c-57.088 73.408-134.08 130.56-222.848 163.328C681.536 570.112 615.616 518.4 537.6 518.4'
+      + 'c-79.936 0-147.264 54.336-166.912 128.064-95.36-31.616-178.048-91.072-238.4-168.704V76.8c0-42.24 34.56-76.8 76.8-76.8'
+      + 'h640c42.24 0 76.8 34.56 76.8 76.8z',
+    'M925.888 554.56V947.2c0 42.24-34.56 76.8-76.8 76.8h-640c-42.24 0-76.8-34.56-76.8-76.8V554.56c59.712 76.8 141.248'
+      + ' 135.808 235.328 167.68C382.208 802.88 452.8 864 537.6 864c87.104 0 159.168-64.448 171.072-148.288'
+      + ' 86.464-33.024 161.344-89.344 217.216-161.152z',
+    'M659.2 691.2c0 14.976-2.688 29.312-7.68 42.56C634.24 779.904 589.76 812.8 537.6 812.8c-50.496 0-93.824-30.784-112.192-74.688'
+      + '-6.08-14.4-9.408-30.272-9.408-46.912 0-10.752 1.408-21.184 4.032-31.104C433.792 608 481.216 569.6 537.6 569.6'
+      + 'c55.04 0 101.504 36.544 116.48 86.72 3.328 11.072 5.12 22.784 5.12 34.88z',
+  ];
 
-  // 口令规则来自 code-rules.js，与脚本版逐字符一致。
-  const codes = globalThis.HBCodes;
-  // 红包详情卡片（envelope.js + envelope.css）：挂在面板自己的影子 DOM 里，一次一张。
-  const envelope = globalThis.HBEnvelope;
-  // 面板只镜像最近一次渲染的 settings 用于输入过滤，权威状态始终在后台；写入一律走消息接口。
-  let settings = { charset: 'text', batch: false, claimMode: 'manual', gapExtraMs: 0 };
-  const fieldStates = new WeakMap();
-  // 最近一次渲染的完整状态，供「打开卡片」按 id 找条目；以及当前卡片对应的条目 id。
-  let lastState = null;
-  let openEnvelopeId = null;
+  function icon(path) {
+    return '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"'
+      + ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="' + path + '"></path></svg>';
+  }
+
+  function packetIcon() {
+    return '<svg viewBox="0 0 1024 1024" aria-hidden="true" fill="currentColor">'
+      + PACKET_ICON_PATHS.map((path, index) => '<path d="' + path + '"'
+        + (index === 2 ? ' class="hb-packet-seal"' : '') + '></path>').join('')
+      + '</svg>';
+  }
 
   const TEMPLATE = `
     <header class="hb-header">
-      <div class="hb-heading">
-        <h1 class="hb-title">红包口令面板</h1>
-        <span class="hb-subtitle">红包口令</span>
-      </div>
-      <span class="hb-version" id="hb-version"></span>
-    </header>
-    <form class="hb-card hb-input-card" id="hb-form">
-      <div class="hb-input-head">
-        <button type="button" class="hb-switch" data-switch="batch" role="switch" aria-checked="false">
+      <div class="hb-switches">
+        <button type="button" class="hb-switch" data-switch="batch" data-on="batch" role="switch" aria-checked="false">
           <span class="hb-switch-option" data-value="single">单个</span>
           <span class="hb-switch-option" data-value="batch">批量</span>
         </button>
-        <button type="button" class="hb-switch" data-switch="charset" role="switch" aria-checked="false">
+        <button type="button" class="hb-switch" data-switch="charset" data-on="numeric" role="switch" aria-checked="false">
           <span class="hb-switch-option" data-value="text">文本</span>
           <span class="hb-switch-option" data-value="numeric">数字</span>
         </button>
       </div>
-      <input id="hb-input" class="hb-field" type="text" autocomplete="off" autocapitalize="off" spellcheck="false">
-      <textarea id="hb-textarea" class="hb-field hb-field--batch" rows="3" autocomplete="off" autocapitalize="off" spellcheck="false" hidden></textarea>
+      <button type="button" class="hb-icon hb-open-site" id="hb-open-site" title="在新标签页打开红包网站" aria-label="在新标签页打开红包网站">${icon(ICON_PATHS.external)}</button>
+      <button type="button" class="hb-icon hb-config-toggle" id="hb-config-toggle" title="配置" aria-label="配置" aria-expanded="false">${icon(ICON_PATHS.gear)}</button>
+      <button type="button" class="hb-icon hb-close" id="hb-close" title="收起面板" aria-label="收起面板">${icon(ICON_PATHS.close)}</button>
+    </header>
+    <div class="hb-config" id="hb-config" hidden>
+      <div class="hb-config-row">
+        <span>领取方式：</span>
+        <button type="button" class="hb-switch hb-claim-mode" data-switch="claimMode" data-on="direct" role="switch" aria-label="协议领取" aria-checked="false">
+          <span class="hb-switch-option" data-value="manual">古法</span>
+          <span class="hb-switch-option" data-value="direct">协议</span>
+        </button>
+        <span class="hb-config-version" id="hb-config-version"></span>
+      </div>
+      <div class="hb-config-row hb-config-gap-row">
+        <span>间隔时间：</span><span>${P.GAP_BASE_MS}+</span>
+        <input id="hb-gap" class="hb-gap" type="number" min="0" max="${P.GAP_EXTRA_MAX_MS}" step="100" aria-label="基础间隔之上的加时（毫秒）"><span>ms</span>
+      </div>
+      <div class="hb-config-row">
+        <span>显示方式：</span>
+        <button type="button" class="hb-switch" data-switch="display" data-on="dock" role="switch" aria-checked="false">
+          <span class="hb-switch-option" data-value="float">悬浮</span>
+          <span class="hb-switch-option" data-value="dock">停靠</span>
+        </button>
+      </div>
+      <div class="hb-config-row">
+        <span>红包站：</span><span class="hb-config-session" id="hb-session-text">状态未确认</span>
+        <button type="button" class="hb-mini hb-session" id="hb-session">检查登录</button>
+      </div>
+    </div>
+    <form class="hb-body" id="hb-form">
+      <div class="hb-input-row">
+        <input id="hb-input" class="hb-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false">
+      </div>
+      <textarea id="hb-textarea" class="hb-input hb-textarea" rows="4" autocomplete="off" autocapitalize="off" spellcheck="false" hidden></textarea>
       <div class="hb-submit-row">
-        <button type="submit" class="hb-button hb-button--primary hb-submit" id="hb-submit">拆红包</button>
+        <button type="submit" class="hb-submit" id="hb-submit">拆红包</button>
         <span class="hb-count" id="hb-count">0/18</span>
       </div>
+      <div class="hb-paused" id="hb-paused" hidden>
+        <span class="hb-paused-text" id="hb-paused-text"></span>
+        <button type="button" class="hb-mini hb-resume" id="hb-resume">恢复执行</button>
+      </div>
+      <div class="hb-history">
+        <div class="hb-history-head">
+          <span id="hb-history-label"></span>
+          <span class="hb-history-actions">
+            <button type="button" class="hb-mini hb-void-all" id="hb-void-all" title="作废队列" aria-label="作废队列">${icon(ICON_PATHS.ban)}</button>
+            <button type="button" class="hb-mini hb-clear" id="hb-clear" title="清空历史" aria-label="清空历史">${icon(ICON_PATHS.trash)}</button>
+          </span>
+        </div>
+        <div class="hb-list" id="hb-list" tabindex="0"></div>
+      </div>
     </form>
-    <section class="hb-card" id="hb-queue">
-      <div class="hb-stats">
-        <span class="hb-stat"><b id="hb-count-entries">0</b> 条口令</span>
-        <span class="hb-stat"><b id="hb-count-waiting">0</b> 等待中</span>
-        <span class="hb-stat"><b id="hb-count-done">0</b> 已完成</span>
-      </div>
-      <p class="hb-paused" id="hb-paused" hidden></p>
-      <ul class="hb-list" id="hb-list"></ul>
-      <p class="hb-empty" id="hb-empty">队列为空，输入口令后点「拆红包」。</p>
-      <div class="hb-queue-actions">
-        <button type="button" class="hb-row-button" id="hb-resume" hidden>继续队列</button>
-        <button type="button" class="hb-row-button" id="hb-void-all" hidden>全部作废</button>
-        <button type="button" class="hb-row-button" id="hb-clear" hidden>清空历史</button>
-      </div>
-    </section>
-    <section class="hb-card hb-meta" id="hb-meta"></section>
-    <section class="hb-actions">
-      <button type="button" class="hb-button" id="hb-session">检查登录</button>
-      <button type="button" class="hb-button hb-button--primary" id="hb-open-sidebar" hidden>在侧边栏常显</button>
-      <button type="button" class="hb-button" id="hb-open-site"></button>
-    </section>
     <p class="hb-hint" id="hb-hint"></p>
   `;
+
+  // 面板只镜像最近一次渲染的 settings 用于输入过滤与开关外观，权威状态始终在后台。
+  let settings = { charset: 'text', batch: false, claimMode: 'manual', gapExtraMs: 0, display: 'panel' };
+  const fieldStates = new WeakMap();
+  // 最近一次渲染的完整状态，供「打开卡片」按 id 找条目、以及渲染相对时间；
+  // 配置面板的展开状态只活在本次会话。
+  let lastState = null;
+  let openEnvelopeId = null;
+  let configOpen = false;
+  let hintNode = null;
 
   function text(selector, value) {
     const node = document.querySelector(selector);
@@ -194,12 +241,16 @@
     const list = field ? codes.parseCodes(field.value, settings.charset, settings.batch === true) : [];
     const invalid = list.map((item) => codes.validateCode(item.code, item.charset)).find(Boolean);
 
-    counter.hidden = !single;
-    counter.textContent = single
-      ? Array.from(field.value || '').length + '/' + codes.codeLengthLimit(settings.charset)
-      : '';
-    submit.disabled = !list.length || Boolean(invalid);
-    submit.title = invalid || (list.length ? '' : '请先输入口令');
+    if (counter) {
+      counter.hidden = !single;
+      counter.textContent = single
+        ? Array.from(field.value || '').length + '/' + codes.codeLengthLimit(settings.charset)
+        : '';
+    }
+    if (submit) {
+      submit.disabled = !list.length || Boolean(invalid);
+      submit.title = invalid || (list.length ? '' : '请先输入口令');
+    }
   }
 
   // 切换模式时把草稿搬过去而不是复制：批量列表保留剩余行，单个输入框保留首行。
@@ -228,7 +279,29 @@
     textarea.value = textarea.value.split('\n').map(codes.keepNumericOnly).filter(Boolean).join('\n');
   }
 
-  function renderInput(state) {
+  // 点历史里的口令就把它填进当前输入框：单个模式替换草稿，批量模式接在末尾追加一行。
+  function fillFromHistory(code) {
+    const field = activeField();
+    if (!field) return;
+    field.value = settings.batch === true
+      ? codes.sanitizeValue((field.value.replace(/\s+$/, '') + '\n' + code).replace(/^\n+/, ''), true, settings.charset)
+      : codes.sanitizeValue(code, false, settings.charset);
+    syncDraft();
+    field.focus();
+  }
+
+  /* --------------------------------- 头部 ---------------------------------- */
+
+  function setSwitch(name, value) {
+    const container = document.querySelector('[data-switch="' + name + '"]');
+    if (!container) return;
+    container.setAttribute('aria-checked', String(container.dataset.on === value));
+    for (const option of container.querySelectorAll('.hb-switch-option')) {
+      option.classList.toggle('is-active', option.dataset.value === value);
+    }
+  }
+
+  function renderHeader(state) {
     settings = { ...settings, ...(state.settings || {}) };
     const batch = settings.batch === true;
     const charset = settings.charset === 'numeric' ? 'numeric' : 'text';
@@ -240,262 +313,186 @@
     input.inputMode = charset === 'numeric' ? 'numeric' : 'text';
     textarea.inputMode = input.inputMode;
     input.placeholder = charset === 'numeric' ? '8 位数字（0–9）' : '6–18 位数字、汉字或字母';
-    textarea.placeholder = charset === 'numeric' ? '每行一个 8 位数字口令' : '每行一个 6–18 位数字、汉字或字母口令';
+    textarea.placeholder = charset === 'numeric'
+      ? '每行一个 8 位数字口令'
+      : '每行一个 6–18 位数字、汉字或字母口令';
+
+    setSwitch('batch', batch ? 'batch' : 'single');
+    setSwitch('charset', charset);
+    setSwitch('claimMode', settings.claimMode === 'direct' ? 'direct' : 'manual');
+    setSwitch('display', displayMode(settings) === 'dock' ? 'dock' : 'float');
 
     const batchSwitch = document.querySelector('[data-switch="batch"]');
     const charsetSwitch = document.querySelector('[data-switch="charset"]');
-    batchSwitch.setAttribute('aria-checked', String(batch));
-    charsetSwitch.setAttribute('aria-checked', String(charset === 'numeric'));
-    for (const option of batchSwitch.querySelectorAll('.hb-switch-option')) {
-      option.classList.toggle('is-active', option.dataset.value === (batch ? 'batch' : 'single'));
-    }
-    for (const option of charsetSwitch.querySelectorAll('.hb-switch-option')) {
-      option.classList.toggle('is-active', option.dataset.value === charset);
-    }
+    const displaySwitch = document.querySelector('[data-switch="display"]');
+    const claimSwitch = document.querySelector('[data-switch="claimMode"]');
+    batchSwitch.title = batch ? '当前批量模式，点击切换单个' : '当前单个模式，点击切换批量';
+    charsetSwitch.title = charset === 'numeric' ? '当前数字模式，点击切换文本' : '当前文本模式，点击切换数字';
+    displaySwitch.title = displayMode(settings) === 'dock' ? '当前停靠显示，点击切换悬浮' : '当前悬浮显示，点击切换停靠';
+    claimSwitch.title = (settings.claimMode === 'direct' ? '当前协议：直接领取；点击切换古法' : '当前古法：弹窗手动开启；点击切换协议')
+      + '。对之后提交的口令生效';
+
     syncDraft();
   }
 
-  // 保存设置：先本地镜像并立即刷新开关外观，再写后台；
-  // 后台状态回来后还会经 storage.onChanged 重渲染一次，因此这里不等回环。
-  async function patchSettings(patch, hint) {
-    settings = { ...settings, ...patch };
-    renderInput({ settings });
-    try {
-      const response = await api.runtime.sendMessage({ type: 'hb:state:patch', patch: { settings: patch } });
-      if (!response?.ok) hint.textContent = '保存设置失败：' + (response?.error || '未知错误');
-    } catch (error) {
-      hint.textContent = '后台暂不可用：' + String(error?.message || error);
-    }
+  // settings.display 存的是 'panel'（点图标弹出）或 'sidebar'（常显侧边栏），界面上叫悬浮/停靠。
+  function displayMode(conf) {
+    return conf.display === 'sidebar' ? 'dock' : 'float';
   }
 
-  async function submitDraft(hint) {
-    const field = activeField();
-    const list = field ? codes.parseCodes(field.value, settings.charset, settings.batch === true) : [];
-    if (!list.length) {
-      hint.textContent = '请先输入口令。';
-      return;
-    }
-    const invalid = list.map((item) => codes.validateCode(item.code, item.charset)).find(Boolean);
-    if (invalid) {
-      hint.textContent = invalid;
-      return;
-    }
-    try {
-      const response = await api.runtime.sendMessage({
-        type: 'hb:submit',
-        codes: list,
-        claimMode: settings.claimMode,
-      });
-      if (!response?.ok) {
-        hint.textContent = '提交未完成：' + (response?.error || '未知错误');
-        return;
-      }
-      // 入队成功后清空草稿，队列状态由 storage 变更推回面板。
-      if (field) field.value = '';
-      syncDraft();
-      hint.textContent = '已加入队列 ' + response.added + ' 条口令。';
-    } catch (error) {
-      hint.textContent = '后台暂不可用：' + String(error?.message || error);
-    }
+  function renderConfig(state) {
+    const config = document.getElementById('hb-config');
+    const toggle = document.getElementById('hb-config-toggle');
+    config.hidden = !configOpen;
+    toggle.setAttribute('aria-expanded', String(configOpen));
+    // 版本号只从清单读，不在 HTML 里硬编码。
+    text('#hb-config-version', 'v' + VERSION);
+
+    const gap = document.getElementById('hb-gap');
+    const wanted = String(Number(state.settings?.gapExtraMs) || 0);
+    // 正在输入时不要被后台回写的值打断。
+    if (gap && document.activeElement !== gap && gap.value !== wanted) gap.value = wanted;
   }
 
-  function renderMeta(state) {
-    const meta = document.getElementById('hb-meta');
-    const conf = state.settings || {};
-    const rows = [
-      ['输入模式', conf.batch ? '批量（每行一条）' : '单个'],
-      ['口令类型', CHARSET_LABEL[conf.charset] || CHARSET_LABEL.text],
-      ['请求间隔', (5 + Math.max(0, Number(conf.gapExtraMs) || 0) / 1000).toFixed(1) + ' 秒起'],
-    ];
-    const nodes = rows.map(([label, value]) => {
-      const row = document.createElement('div');
-      row.className = 'hb-meta-row';
-      const key = document.createElement('span');
-      key.className = 'hb-meta-label';
-      key.textContent = label;
-      const val = document.createElement('span');
-      val.className = 'hb-meta-value';
-      val.textContent = value;
-      row.append(key, val);
-      return row;
-    });
+  /* -------------------------------- 历史列表 -------------------------------- */
 
-    // 领取方式可切换：古法停在等待点击，协议由后台直接领取。
-    const modeRow = document.createElement('div');
-    modeRow.className = 'hb-meta-row';
-    const modeLabel = document.createElement('span');
-    modeLabel.className = 'hb-meta-label';
-    modeLabel.textContent = '领取方式';
-    const switcher = document.createElement('div');
-    switcher.className = 'hb-switch';
-    switcher.dataset.switch = 'claimMode';
-    switcher.setAttribute('role', 'switch');
-    switcher.setAttribute('aria-checked', String(settings.claimMode === 'direct'));
-    switcher.title = CLAIM_MODE_LABEL[settings.claimMode] || CLAIM_MODE_LABEL.manual;
-    for (const [value, label] of [['manual', '古法'], ['direct', '协议']]) {
-      const option = document.createElement('span');
-      option.className = 'hb-switch-option' + (settings.claimMode === value ? ' is-active' : '');
-      option.dataset.value = value;
-      option.textContent = label;
-      switcher.append(option);
-    }
-    modeRow.append(modeLabel, switcher);
-    nodes.push(modeRow);
-    meta.replaceChildren(...nodes);
-  }
-
-  const TONE_CLASS = { normal: 'hb-line--normal', success: 'hb-line--success', error: 'hb-line--error', muted: 'hb-line--muted' };
-
-  function stampText(timestamp) {
+  function formatTime(timestamp) {
     const date = new Date(Number(timestamp) || 0);
     const pad = (value) => String(value).padStart(2, '0');
-    return pad(date.getHours()) + ':' + pad(date.getMinutes());
+    return pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds());
   }
 
-  // 报名过的抽奖在等开奖，页面侧不再给写入动作。
-  function statusLabel(entry) {
-    if (entry.status === 'awaiting' && entry.packet?.joined) return '等待开奖';
-    return STATUS_LABEL[entry.status] || '未知';
-  }
-
-  // 一条历史能给的动作：有红包快照的可以打开详情卡片（只有「待开启」的卡片里带
-  // 开启/参与按钮，历史卡片是只读的），排队中的可以作废，完结的可以删除。
-  function actionsFor(entry) {
-    const actions = [];
-    const packet = entry.packet;
-    if (packet?.id) {
-      const claimable = entry.status === 'awaiting' && entry.claimMode === 'manual';
-      const label = claimable ? (packet.type === 'lottery' ? '参与抽选' : '开红包') : '查看';
-      actions.push({ action: 'open', label, primary: claimable });
-    }
+  function entryTimeText(entry) {
     if (entry.status === 'queued') {
-      actions.push({ action: 'void', label: '作废' });
-      return actions;
+      if (lastState?.paused === true) return '待执行';
+      return entry.scheduledAt ? '预计 ' + formatTime(entry.scheduledAt) : '预计待定';
     }
-    if (entry.status !== 'running') actions.push({ action: 'delete', label: '删除' });
-    return actions;
+    if (entry.status === 'awaiting') return '待开启';
+    if (entry.status === 'running') return entry.startedAt ? formatTime(entry.startedAt) : '执行中';
+    return entry.finishedAt ? formatTime(entry.finishedAt) : '—';
   }
 
-  function renderQueue(state) {
-    const entries = Array.isArray(state.entries) ? state.entries : [];
-    const waiting = entries.filter((entry) => ['queued', 'awaiting', 'running'].includes(entry.status)).length;
-    const done = entries.filter((entry) => entry.status === 'done').length;
-    text('#hb-count-entries', String(entries.length));
-    text('#hb-count-waiting', String(waiting));
-    text('#hb-count-done', String(done));
+  function entryResultText(entry) {
+    if (entry.status === 'queued') return '排队中';
+    if (entry.status === 'awaiting') return '等待手动开启';
+    if (entry.status === 'running') return '正在查询或领取…';
+    return String(entry.result || '') || P.linesText(entry.lines) || '';
+  }
 
-    const paused = state.paused === true;
-    const pausedNode = document.getElementById('hb-paused');
-    pausedNode.hidden = !paused;
-    pausedNode.textContent = paused ? '队列已暂停：' + (state.pausedReason || '上一条未成功，请核对后继续。') : '';
+  // 行内结果：新版本写的是结构化 lines，旧记录只有一段纯文本，两者走同一条渲染路径。
+  function entryLines(entry) {
+    if (Array.isArray(entry.lines) && entry.lines.length) return entry.lines;
+    const value = entryResultText(entry);
+    if (!value) return [];
+    if (entry.status === 'queued') return [P.line(value, 'muted')];
+    if (/领取成功|已领取/.test(value)) return [P.line(value, 'success')];
+    if (/已作废/.test(value)) return [P.line(value, 'muted')];
+    if (/^(已停止|未领取|查询失败|未匹配)/.test(value)
+      && !/(不存在|找不到|未找到|红包已过期)/.test(value)) return [P.line(value, 'error')];
+    return [P.line(value, 'normal')];
+  }
+
+  // 一条历史只给一个动作：还能作废的给「作废」（排队中与待开启），已经落定的给「删除」，
+  // 正在执行的什么都不给，等回执写回历史再处理。
+  function historyAction(entry) {
+    if (['queued', 'awaiting'].includes(entry.status)) return 'void';
+    return entry.status === 'running' ? '' : 'delete';
+  }
+
+  function renderHistory(state) {
+    const entries = Array.isArray(state.entries) ? state.entries : [];
+    const queued = entries.filter((entry) => entry.status === 'queued').length;
+    text('#hb-history-label', '口令历史（' + entries.length + ' 条' + (queued ? ' · 排队 ' + queued + ' 条' : '') + '）');
+
+    const voidAll = document.getElementById('hb-void-all');
+    voidAll.disabled = queued === 0;
 
     const list = document.getElementById('hb-list');
-    // 新条目在上；口令与结果都是外部输入，只作为文本节点写入。
-    const ordered = entries.slice().reverse();
-    list.replaceChildren(...ordered.map((entry) => {
-      const item = document.createElement('li');
-      item.className = 'hb-row';
-      item.dataset.id = entry.id;
+    const scrollTop = list.scrollTop;
+    list.replaceChildren();
+    if (!entries.length) {
+      const empty = document.createElement('p');
+      empty.className = 'hb-empty';
+      empty.textContent = '队列为空，输入口令后点「拆红包」。';
+      list.append(empty);
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    // 新条目在上。
+    for (const entry of entries.slice().reverse()) {
+      const row = document.createElement('div');
+      row.className = 'hb-entry';
+      row.dataset.status = entry.status;
+      row.dataset.id = entry.id;
 
       const head = document.createElement('div');
-      head.className = 'hb-row-head';
-      const code = document.createElement('code');
-      code.className = 'hb-code';
-      code.textContent = String(entry.code || '（无口令）');
-      const status = document.createElement('span');
-      status.className = 'hb-status ' + (STATUS_CLASS[entry.status] || 'hb-status--idle');
-      status.textContent = statusLabel(entry);
-      head.append(code, status);
-      item.append(head);
-
-      const lines = Array.isArray(entry.lines) ? entry.lines : [];
-      const resultText = lines.length ? '' : String(entry.result || '');
-      if (lines.length || resultText) {
-        const result = document.createElement('p');
-        result.className = 'hb-row-result';
-        const items = lines.length
-          ? lines.map((line) => ({ text: line.text, tone: line.tone }))
-          : [{ text: resultText, tone: 'muted' }];
-        result.append(...items.map(({ text: content, tone }) => {
-          const span = document.createElement('span');
-          span.className = 'hb-line ' + (TONE_CLASS[tone] || TONE_CLASS.normal);
-          span.textContent = String(content);
-          return span;
-        }));
-        item.append(result);
-      }
-
-      const foot = document.createElement('div');
-      foot.className = 'hb-row-head';
+      head.className = 'hb-entry-head';
       const time = document.createElement('span');
-      time.className = 'hb-row-time';
-      time.textContent = stampText(entry.createdAt);
-      foot.append(time);
-      for (const action of actionsFor(entry)) {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'hb-row-button' + (action.primary ? ' hb-row-button--primary' : '');
-        button.dataset.action = action.action;
-        button.textContent = action.label;
-        foot.append(button);
+      time.className = 'hb-entry-time hb-time--' + entry.status;
+      time.textContent = entryTimeText(entry);
+      head.append(time);
+      // 数字口令容易被当成普通文本，只有它带类型标记。
+      if (entry.charset === 'numeric') {
+        const type = document.createElement('span');
+        type.className = 'hb-entry-type';
+        type.textContent = '数字';
+        head.append(type);
       }
-      item.append(foot);
-      return item;
-    }));
+      const code = document.createElement('button');
+      code.type = 'button';
+      code.className = 'hb-entry-code';
+      code.dataset.action = 'fill';
+      code.title = '点击把这条口令填入输入框';
+      code.textContent = entry.code;
+      head.append(code);
+      if (P.hasMatchedPacket(entry)) {
+        const packetButton = document.createElement('button');
+        packetButton.type = 'button';
+        packetButton.className = 'hb-entry-packet';
+        packetButton.dataset.action = 'open';
+        packetButton.title = '查看红包详情';
+        packetButton.setAttribute('aria-label', '查看 ' + entry.code + ' 的红包详情');
+        packetButton.innerHTML = packetIcon();
+        head.append(packetButton);
+      }
+      const rowAction = historyAction(entry);
+      if (rowAction) {
+        const actionButton = document.createElement('button');
+        actionButton.type = 'button';
+        actionButton.className = rowAction === 'void' ? 'hb-entry-void' : 'hb-entry-delete';
+        actionButton.dataset.action = rowAction;
+        actionButton.textContent = rowAction === 'void' ? '作废' : '删除';
+        actionButton.title = rowAction === 'void' ? '作废这条口令' : '从历史中删除这条口令';
+        head.append(actionButton);
+      }
+      row.append(head);
 
-    list.hidden = ordered.length === 0;
-    const empty = document.getElementById('hb-empty');
-    empty.hidden = ordered.length > 0;
-    empty.textContent = '队列为空，输入口令后点「拆红包」。';
-
-    document.getElementById('hb-resume').hidden = !paused;
-    document.getElementById('hb-void-all').hidden = !entries.some((entry) => entry.status === 'queued');
-    document.getElementById('hb-clear').hidden = ordered.length === 0;
+      const result = document.createElement('div');
+      result.className = 'hb-entry-result';
+      for (const item of entryLines(entry)) {
+        const line = document.createElement('div');
+        line.className = 'hb-entry-line';
+        line.dataset.tone = item.tone || 'normal';
+        line.textContent = String(item.text ?? '');
+        result.append(line);
+      }
+      row.append(result);
+      fragment.append(row);
+    }
+    list.append(fragment);
+    list.scrollTop = scrollTop;
   }
 
-  function render(state) {
-    lastState = state;
-    renderInput(state);
-    renderQueue(state);
-    renderMeta(state);
-    // 条目在别处被删除或清空时，把它的详情卡片一起收起来。
-    const entries = Array.isArray(state.entries) ? state.entries : [];
-    if (openEnvelopeId && !entries.some((entry) => entry.id === openEnvelopeId)) {
-      openEnvelopeId = null;
-      envelope?.close();
-    }
+  function renderPaused(state) {
+    const banner = document.getElementById('hb-paused');
+    if (!banner) return;
+    const paused = state.paused === true;
+    banner.hidden = !paused;
+    if (paused) text('#hb-paused-text', '执行已暂停：' + (state.pausedReason || '执行报错'));
   }
 
-  // chrome.sidePanel.open 必须在用户手势内发起，而 await 会打断手势，
-  // 因此在面板初始化时先取窗口 ID，点击时同步调用。
-  let currentWindowId = null;
-
-  async function rememberWindowId() {
-    try {
-      currentWindowId = (await api.windows.getCurrent()).id ?? null;
-    } catch {
-      currentWindowId = null;
-    }
-  }
-
-  function openSidebar(hint) {
-    if (!api.sidePanel?.open) {
-      hint.textContent = '当前浏览器不支持扩展侧边栏，请使用 Chrome 116 及以上版本。';
-      return;
-    }
-    if (currentWindowId === null) {
-      hint.textContent = '尚未确认当前窗口，请在弹出面板中重试。';
-      return;
-    }
-    api.sidePanel.open({ windowId: currentWindowId }).then(() => {
-      window.close();
-    }, (error) => {
-      hint.textContent = '打开侧边栏失败：' + String(error?.message || error);
-    });
-  }
-
-  // 只读红包详情：memory 优先，network 为真（或后台没缓存）时让后台补一次 GET。
-  let hintNode = null;
+  /* --------------------------------- 写入 ---------------------------------- */
 
   // 所有动作都经这里转给后台：成功与否都写进面板底部的提示行。
   function send(message, okText) {
@@ -508,6 +505,38 @@
     });
   }
 
+  // 保存设置：先本地镜像并立即刷新开关外观，再写后台；
+  // 后台状态回来后还会经 storage.onChanged 重渲染一次，因此这里不等回环。
+  async function patchSettings(patch, hint) {
+    settings = { ...settings, ...patch };
+    renderHeader(lastState || { settings });
+    renderConfig(lastState || { settings });
+    const response = await send({ type: 'hb:state:patch', patch: { settings: patch } }, '');
+    if (response && !response.ok && hint) hint.textContent = '保存设置失败：' + (response.error || '未知错误');
+  }
+
+  async function submitDraft() {
+    const field = activeField();
+    const list = field ? codes.parseCodes(field.value, settings.charset, settings.batch === true) : [];
+    if (!list.length) {
+      hintNode.textContent = '请先输入口令。';
+      return;
+    }
+    const invalid = list.map((item) => codes.validateCode(item.code, item.charset)).find(Boolean);
+    if (invalid) {
+      hintNode.textContent = invalid;
+      return;
+    }
+    const response = await send({ type: 'hb:submit', codes: list, claimMode: settings.claimMode }, '');
+    if (!response?.ok) return;
+    // 入队成功后清空草稿，队列状态由 storage 变更推回面板。
+    if (field) field.value = '';
+    syncDraft();
+    hintNode.textContent = '已加入队列 ' + response.added + ' 条口令。';
+  }
+
+  /* ------------------------------ 红包详情卡片 ------------------------------ */
+
   async function readPacket(packetId, network) {
     try {
       const response = await api.runtime.sendMessage({ type: 'hb:packet', id: packetId, refresh: network === true });
@@ -519,14 +548,14 @@
 
   // 打开红包详情卡片：先用历史里那份快照立即出卡片，再把手上的只读请求结果补进去。
   // 卡片上的「开」/「参与抽选」是唯一的写入入口，由 envelope.js 校验真实点击。
-  async function openEnvelope(id, hint) {
+  async function openEnvelope(id) {
     const entry = (lastState?.entries || []).find((item) => item.id === id);
     if (!entry?.packet?.id) {
-      hint.textContent = '这条记录没有红包详情可看。';
+      hintNode.textContent = '这条记录没有红包详情可看。';
       return;
     }
     if (!envelope) {
-      hint.textContent = '红包卡片未加载，请重新打开面板。';
+      hintNode.textContent = '红包卡片未加载，请重新打开面板。';
       return;
     }
     const packetId = entry.packet.id;
@@ -542,11 +571,11 @@
     });
     if (!handle) {
       openEnvelopeId = null;
-      hint.textContent = '红包卡片打开失败，请重试。';
+      hintNode.textContent = '红包卡片打开失败，请重试。';
       return;
     }
     openEnvelopeId = id;
-    hint.textContent = '正在读取红包详情…';
+    hintNode.textContent = '正在读取红包详情…';
     const [fresh, session] = await Promise.all([
       readPacket(packetId, true),
       api.runtime.sendMessage({ type: 'hb:session' }).catch(() => null),
@@ -557,66 +586,138 @@
       ? { username: session.username, linuxdo_id: session.linuxdo_id ?? null }
       : null;
     handle.update({ packet: fresh || undefined, user });
-    hint.textContent = fresh ? '' : '暂时读不到最新详情，显示的是本地记录。';
+    hintNode.textContent = fresh ? '' : '暂时读不到最新详情，显示的是本地记录。';
   }
 
-  function mount(root, options = {}) {
-    root.innerHTML = TEMPLATE;
-    text('#hb-version', 'v' + VERSION);
+  /* -------------------------------- 侧边栏 --------------------------------- */
 
+  // chrome.sidePanel.open 必须在用户手势内发起，而 await 会打断手势，
+  // 因此在面板初始化时先取窗口 ID，点击时同步调用。
+  let currentWindowId = null;
+
+  async function rememberWindowId() {
+    try {
+      currentWindowId = (await api.windows.getCurrent()).id ?? null;
+    } catch {
+      currentWindowId = null;
+    }
+  }
+
+  function openSidebar() {
+    if (!api.sidePanel?.open) {
+      hintNode.textContent = '当前浏览器不支持扩展侧边栏，请使用 Chrome 116 及以上版本。';
+      return;
+    }
+    if (currentWindowId === null) {
+      hintNode.textContent = '尚未确认当前窗口，请在弹出面板中重试。';
+      return;
+    }
+    api.sidePanel.open({ windowId: currentWindowId }).then(() => {
+      window.close();
+    }, (error) => {
+      hintNode.textContent = '打开侧边栏失败：' + String(error?.message || error);
+    });
+  }
+
+  /* --------------------------------- 入口 ---------------------------------- */
+
+  function mount(root, options = {}) {
+    // 悬浮（弹出面板）是默认形态；侧边栏外壳传 shell: 'sidebar'。
+    const shell = options.shell || (options.allowSidePanelOpen === false ? 'sidebar' : 'popup');
+    const isPopup = shell === 'popup';
+
+    root.innerHTML = TEMPLATE;
     const hint = document.getElementById('hb-hint');
     hintNode = hint;
-    const sidebarButton = document.getElementById('hb-open-sidebar');
-    if (options.allowSidePanelOpen) {
-      sidebarButton.hidden = false;
-      sidebarButton.addEventListener('click', () => openSidebar(hint));
-      rememberWindowId();
-      hint.textContent = '面板在任意网站都可用；关闭面板不影响后台队列。';
-    }
-    if (!options.allowSidePanelOpen) {
-      hint.textContent = '面板固定在浏览器侧边栏，可在侧边栏菜单中调整位置；关闭侧边栏不影响后台队列。';
-    }
 
-    const siteButton = document.getElementById('hb-open-site');
-    siteButton.textContent = '打开 ' + SITE_LABEL;
-    siteButton.addEventListener('click', () => {
+    document.getElementById('hb-open-site').addEventListener('click', () => {
       api.tabs.create({ url: SITE_URL });
     });
-
-    // 队列动作都交给后台：面板只发消息，状态经 storage 变更回流后重绘。
-    document.getElementById('hb-resume').addEventListener('click', () => send({ type: 'hb:resume' }, ''));
-    document.getElementById('hb-void-all').addEventListener('click', () => send({ type: 'hb:void-all' }, ''));
-    document.getElementById('hb-clear').addEventListener('click', () => send({ type: 'hb:clear' }, ''));
-
-    document.getElementById('hb-session').addEventListener('click', async () => {
-      hint.textContent = '正在确认红包站登录状态…';
-      const response = await send({ type: 'hb:session' }, '');
-      if (!response?.ok) return;
-      hint.textContent = response.loggedIn
-        ? '已登录红包站：' + response.username
-        : '未检测到红包站登录状态，请打开 ' + SITE_LABEL + ' 登录后再试。';
+    document.getElementById('hb-config-toggle').addEventListener('click', () => {
+      configOpen = !configOpen;
+      renderConfig(lastState || { settings });
     });
+    // 收起 = 关掉弹出面板；侧边栏由浏览器自己收起，所以那里不出现这个按钮。
+    const closeButton = document.getElementById('hb-close');
+    if (isPopup) {
+      closeButton.addEventListener('click', () => window.close());
+    } else {
+      closeButton.hidden = true;
+    }
 
-    document.getElementById('hb-meta').addEventListener('click', (event) => {
-      if (!event.target.closest('[data-switch="claimMode"]')) return;
+    document.querySelector('[data-switch="batch"]').addEventListener('click', () => {
+      const next = settings.batch !== true;
+      moveDraftToMode(next);
+      patchSettings({ batch: next }, hint);
+      activeField()?.focus();
+    });
+    document.querySelector('[data-switch="charset"]').addEventListener('click', () => {
+      const next = settings.charset === 'numeric' ? 'text' : 'numeric';
+      applyCharsetToDraft(next);
+      patchSettings({ charset: next }, hint);
+      activeField()?.focus();
+    });
+    document.querySelector('[data-switch="claimMode"]').addEventListener('click', () => {
       const next = settings.claimMode === 'direct' ? 'manual' : 'direct';
       patchSettings({ claimMode: next }, hint);
       hint.textContent = next === 'direct'
         ? '新的口令会由后台直接领取。'
         : '新的口令会停在「待开启」，由你在面板上点击开启。';
     });
+    document.querySelector('[data-switch="display"]').addEventListener('click', () => {
+      const next = displayMode(settings) === 'dock' ? 'float' : 'dock';
+      patchSettings({ display: next === 'dock' ? 'sidebar' : 'panel' }, hint);
+      if (next === 'dock') {
+        if (isPopup) {
+          openSidebar();
+          return;
+        }
+        hint.textContent = '面板已固定在浏览器侧边栏。';
+        return;
+      }
+      hint.textContent = isPopup ? '当前是悬浮形态：点扩展图标弹出面板。' : '已切回悬浮：点扩展图标即可弹出面板。';
+    });
+
+    const gapInput = document.getElementById('hb-gap');
+    // 输入时即时生效，失焦或回车后再把夹紧后的值写回控件。
+    gapInput.addEventListener('input', () => {
+      patchSettings({ gapExtraMs: P.clampGapExtra(gapInput.value) }, hint);
+    });
+    gapInput.addEventListener('change', () => {
+      patchSettings({ gapExtraMs: P.clampGapExtra(gapInput.value) }, hint);
+      gapInput.value = String(P.clampGapExtra(gapInput.value));
+    });
+
+    document.getElementById('hb-session').addEventListener('click', async () => {
+      hint.textContent = '正在确认红包站登录状态…';
+      const response = await send({ type: 'hb:session' }, '');
+      if (!response?.ok) return;
+      text('#hb-session-text', response.loggedIn ? '已登录：' + response.username : '未登录');
+      hint.textContent = response.loggedIn
+        ? '已登录红包站：' + response.username
+        : '未检测到红包站登录状态，请打开 ' + SITE_LABEL + ' 登录后再试。';
+    });
+
+    document.getElementById('hb-resume').addEventListener('click', () => send({ type: 'hb:resume' }, ''));
+    document.getElementById('hb-void-all').addEventListener('click', () => send({ type: 'hb:void-all' }, ''));
+    document.getElementById('hb-clear').addEventListener('click', () => send({ type: 'hb:clear' }, ''));
 
     // 历史行的动作走事件委托：行元素每次渲染都会重建。
     document.getElementById('hb-list').addEventListener('click', (event) => {
       const button = event.target.closest('button[data-action]');
       if (!button) return;
-      const id = button.closest('.hb-row')?.dataset.id;
+      const row = button.closest('.hb-entry');
+      const id = row?.dataset.id;
       if (!id) return;
       const action = button.dataset.action;
+      if (action === 'fill') {
+        fillFromHistory(button.textContent);
+        return;
+      }
       button.disabled = true;
       // 打开详情卡片只是只读操作；真正的领取/参与在卡片里由真实点击触发。
       if (action === 'open') {
-        openEnvelope(id, hint).finally(() => { button.disabled = false; });
+        openEnvelope(id).finally(() => { button.disabled = false; });
         return;
       }
       const message = action === 'void' ? { type: 'hb:void', id } : { type: 'hb:delete', id };
@@ -630,21 +731,15 @@
     installField(document.getElementById('hb-textarea'));
     form.addEventListener('submit', (event) => {
       event.preventDefault();
-      submitDraft(hint);
+      submitDraft();
     });
-    document.querySelector('[data-switch="batch"]').addEventListener('click', () => {
-      const next = settings.batch !== true;
-      moveDraftToMode(next);
-      patchSettings({ batch: next }, hint);
-      activeField()?.focus();
-    });
-    document.querySelector('[data-switch="charset"]').addEventListener('click', () => {
-      const next = settings.charset === 'numeric' ? 'text' : 'numeric';
-      applyCharsetToDraft(next);
-      patchSettings({ charset: next }, hint);
-      activeField()?.focus();
-    });
-    syncDraft();
+
+    if (isPopup) {
+      rememberWindowId();
+      hint.textContent = '面板在任意网站都可用；关闭面板不影响后台队列。';
+    } else {
+      hint.textContent = '面板固定在浏览器侧边栏；关闭侧边栏不影响后台队列。';
+    }
 
     const refresh = async () => {
       try {
@@ -657,7 +752,7 @@
       }
     };
 
-    // 面板与内容脚本共享同一份 chrome.storage.local 状态，直接订阅变更，不再自己做副本。
+    // 面板与后台共享同一份 chrome.storage.local 状态，直接订阅变更，不再自己做副本。
     api.storage.onChanged.addListener((changes, area) => {
       if (area === 'local' && changes[STATE_KEY]) refresh();
     });
@@ -666,5 +761,20 @@
     return { refresh };
   }
 
+  function render(state) {
+    lastState = state;
+    renderHeader(state);
+    renderConfig(state);
+    renderPaused(state);
+    renderHistory(state);
+    // 条目在别处被删除或清空时，把它的详情卡片一起收起来。
+    const entries = Array.isArray(state.entries) ? state.entries : [];
+    if (openEnvelopeId && !entries.some((entry) => entry.id === openEnvelopeId)) {
+      openEnvelopeId = null;
+      envelope?.close();
+    }
+  }
+
   globalThis.HBPanel = { mount };
 })();
+

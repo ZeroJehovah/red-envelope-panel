@@ -16,10 +16,10 @@ src/
 ├── code-rules.js      # 口令清洗、分享文案取词与校验规则（纯逻辑，暴露 globalThis.HBCodes）
 ├── hb-protocol.js     # 红包站协议层：端点、错误文案与结果行（纯函数，暴露 globalThis.HBProtocol）
 ├── background.js      # service worker：状态持有者、消息路由、请求代理、限速与队列
-├── panel.js           # 弹出面板与侧边栏共用渲染器：口令输入区、队列与历史区（HBPanel.mount）
+├── panel.js           # 弹出面板与侧边栏共用渲染器：按脚本版 ensurePanel() 复刻的头部开关、配置面板、输入区与历史区（HBPanel.mount）
 ├── panel.css          # 面板共用样式（莫兰迪配色）
 ├── envelope.js        # 面板内红包详情卡片（信封弹窗、领取记录、抽奖倒计时与名单，暴露 globalThis.HBEnvelope）
-├── envelope.css       # 卡片样式（挂进 #hb-envelope-host 的 shadow root，卡片内部沿用站点红/金配色）
+├── envelope.css       # 卡片样式（挂进 #hb-envelope-host 的 shadow root，卡片内部沿用站点红/金配色，按面板可用尺寸铺满）
 ├── popup.html/.js     # 点图标弹出面板的外壳
 ├── sidepanel.html/.js # 常显侧边栏的外壳
 ├── icons/             # 16/32/48/128 PNG（由 tools/make-icons.py 生成）
@@ -34,7 +34,8 @@ src/
 - **口令规则**：字符清洗、分享文案取词与校验集中在 `code-rules.js`（暴露 `globalThis.HBCodes`），面板与 `node --test` 共用同一份实现；规则按脚本版原样保留（含站点标识匹配），不要在两处各写一份。
 - **协议层**：端点、错误文案与结果行集中在 `hb-protocol.js`（暴露 `globalThis.HBProtocol`），后台与 `node --test` 共用；文案按脚本版移植，改文案只改这一处。
 - **网络**：只允许访问 `https://hb.unsnow.org`；跨域请求只能由后台 service worker 发起（`credentials: 'include'` 携带会话 Cookie，15 秒超时），扩展页面不得直接请求。
-- **详情卡片**：红包详情（金额、领取进度与记录、抽奖倒计时与名单）由 `envelope.js` 挂在面板页面内的 shadow DOM 宿主 `#hb-envelope-host` 上，一次只显示一张卡片；不向浏览的网页注入任何 DOM 或样式。卡片头像只从 `hb.unsnow.org` 来源加载，其他一律回落到内联 SVG data URI。
+- **面板结构**：`panel.js` / `panel.css` 按脚本版 `ensurePanel()` 1:1 复刻（头部两个开关与三个图标按钮、可折叠的配置面板、输入区与「拆红包」＋字数提示、暂停横幅与「恢复执行」、历史头与逐行动作、点击历史口令填入输入框）。「悬浮/停靠」分别映射到点图标弹出的面板与浏览器常显侧边栏，窗口的位置与尺寸交给浏览器，不要重新引入脚本版的拖拽与八向缩放手柄。
+- **详情卡片**：红包详情（金额、领取进度与记录、抽奖倒计时与名单）由 `envelope.js` 挂在面板页面内的 shadow DOM 宿主 `#hb-envelope-host` 上，一次只显示一张卡片；不向浏览的网页注入任何 DOM 或样式。卡片头像只从 `hb.unsnow.org` 来源加载，其他一律回落到内联 SVG data URI。卡片按面板可用尺寸铺满（`width: min(560px, 100%)`、高度上限 760px、`--envelope-zoom` 恒为 1），且卡片本体只有一层：`createNode()` 已经建出 `.redpacket-envelope`，markup 里不得再套同名 class。
 - **写请求来源**：站点 POST 接口只认自己那一个 `Origin`，扩展自动附带的 `Origin: chrome-extension://<id>` 会被回 403「请求来源不合法」。因此清单常带 `declarativeNetRequestWithHostAccess` 权限与 `rules.json`（改写 `https://hb.unsnow.org/api/` 的 `Origin`/`Referer`）；两者必须在同一次改动里保持同步，`tests/manifest.test.cjs` 会守住这条。
 - **站点无关**：不注册内容脚本、不注入页面 DOM 或样式、不依赖任何浏览站点的 DOM 结构；可选的站点内嵌模式必须单独引入权限并在此处登记。
 - **状态**：`chrome.storage.local` 的 `hb-state-v1` 是唯一真实来源；所有写入必须经后台消息接口，扩展页面不做本地副本。
@@ -82,3 +83,17 @@ src/
 - Chrome：`chrome://extensions` → 开发者模式 → 「加载已解压的扩展程序」选择 `src/`。
 - 静态自检：在 `src/` 下执行 `node --test`（清单与引用文件、口令规则用例，以及后台集成自检：vm 沙箱 + 假时钟 + 假 `fetch` 驱动真实消息契约）。
 - 面板 DOM 自检：把 `tests/panel-harness.html` 复制到扩展产物目录（与 `manifest.json` 同级），用 Chrome 打开或用无头模式 `--dump-dom` 运行；标题为 `HARNESS-PASS`、`#harness-result` 里 `FAIL 0` 即通过。该文件只用于开发期，不随扩展发布。
+
+## 产物同步（强制）
+
+- 每轮迭代结束（含提交与推送）后，把 `src/` 镜像到 `D:\Green Files\chrome plugins\red-envelope-panel\`，再在 `chrome://extensions` 重新加载该目录确认版本号与面板可用。
+- 镜像命令（9p 文件系统下 `rsync -a` 会报 code 23，因此逐项降级并排除开发期文件）：
+
+  ```bash
+  rsync -r --delete --inplace --no-perms --no-owner --no-group --no-times \
+    --exclude '.git/' --exclude 'tests/' --exclude 'tools/' \
+    --exclude 'AGENTS.md' --exclude '.gitignore' --exclude '_metadata/' \
+    src/ "/mnt/d/Green Files/chrome plugins/red-envelope-panel/"
+  ```
+
+- `_metadata/` 必须排除：Chrome 加载解压扩展后会自己在目标目录里生成它，不排除会被镜像删掉。改完后用 `diff -r -x _metadata src "/mnt/d/Green Files/chrome plugins/red-envelope-panel"` 核对（只应剩下 `tests/`、`tools/`、`AGENTS.md`、`.gitignore` 这几项差异）。

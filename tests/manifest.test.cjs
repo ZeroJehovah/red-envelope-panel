@@ -96,4 +96,48 @@ test('红包详情卡片随包，头像只从红包站来源加载', () => {
   assert.match(js, /HB_SITE_URL/, 'envelope.js 未使用红包站地址');
   assert.match(js, /url\.origin !== site\.origin/, '头像来源没有做同源限制');
   assert.match(js, /data:image\/svg\+xml/, '缺少内联 SVG 头像兜底');
+  // 卡片本体由 createNode() 建出来，markup 里再套一层 .redpacket-envelope
+  // 会把 34/24px 内边距、12px 圆角与 520px 定高叠两遍，底部多出一截空红底。
+  assert.equal(js.includes('<div class="redpacket-envelope">'), false, 'ENVELOPE_MARKUP 里不该再套一层卡片');
+});
+
+test('面板按脚本版侧边栏的结构复刻控件', () => {
+  // 这一组是脚本版 ensurePanel() 里逐项对应的控件，缺一个都算没复刻。
+  const panel = readFileSync(join(root, 'panel.js'), 'utf8');
+  const parts = [
+    ['头部两个开关', /data-switch="batch"/],
+    ['文本/数字开关', /data-switch="charset"/],
+    ['打开红包站图标按钮', /id="hb-open-site"/],
+    ['配置面板的齿轮按钮', /id="hb-config-toggle"/],
+    ['收起按钮', /id="hb-close"/],
+    ['领取方式开关', /data-switch="claimMode"/],
+    ['间隔时间输入', /id="hb-gap"/],
+    ['显示方式开关', /data-switch="display"/],
+    ['配置面板里的版本号', /id="hb-config-version"/],
+    ['登录状态与检查登录', /id="hb-session"/],
+    ['历史头文案', /口令历史（/],
+    ['作废队列按钮', /id="hb-void-all"/],
+    ['清空历史按钮', /id="hb-clear"/],
+    ['暂停横幅与恢复执行', /id="hb-resume"/],
+    ['点口令填入输入框', /function fillFromHistory/],
+    ['口令按钮的提示文案', /点击把这条口令填入输入框/],
+    ['红包详情入口', /hb-entry-packet/],
+  ];
+  for (const [name, pattern] of parts) {
+    assert.match(panel, pattern, '缺少' + name);
+  }
+  // 显示方式把脚本版的悬浮/停靠映射到弹出面板与常显侧边栏。
+  assert.match(panel, /display === 'sidebar' \? 'dock' : 'float'/);
+  assert.match(panel, /display: next === 'dock' \? 'sidebar' : 'panel'/);
+  // 两个外壳分别声明自己的形态。
+  assert.match(readFileSync(join(root, 'popup.js'), 'utf8'), /shell: 'popup'/);
+  assert.match(readFileSync(join(root, 'sidepanel.js'), 'utf8'), /shell: 'sidebar'/);
+});
+
+test('红包卡片在面板里按可用尺寸铺满', () => {
+  const css = readFileSync(join(root, 'envelope.css'), 'utf8');
+  // 原站是 320×520 再乘 1.2 倍，面板里改成铺满可用宽度并取消二次缩小。
+  assert.match(css, /width: min\(560px, 100%\)/);
+  assert.match(css, /--envelope-zoom: 1;/);
+  assert.equal(/--envelope-zoom: \.8/.test(css), false, '面板里不该再按窗口尺寸缩小卡片');
 });
