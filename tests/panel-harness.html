@@ -1,0 +1,145 @@
+<!doctype html>
+<!-- 面板 DOM 接线自检页（开发期用，不随扩展发布）。
+
+     用法：把本文件复制到扩展产物目录（与 manifest.json 同级，例如同步后的
+     D:\Green Files\chrome plugins\red-envelope-panel\），再用 Chrome 打开；页面用最小
+     chrome API 替身挂载 panel.js，跑完把结果写进 #harness-result，标题变为 HARNESS-PASS / HARNESS-FAIL。
+
+     无头运行示例（Windows 版 Chrome for Testing）：
+       chrome.exe --headless=new --disable-gpu --virtual-time-budget=5000 \
+         --user-data-dir="D:\Green Files\ChromeForTestingProfiles\panel-harness" \
+         --dump-dom "file:///D:/Green%20Files/chrome%20plugins/red-envelope-panel/panel-harness.html"
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>panel harness</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body class="hb-popup">
+    <main id="app"></main>
+    <pre id="harness-result">running</pre>
+    <script>
+      // 最小 chrome API 替身：只回放面板用到的消息契约。
+      const sent = [];
+      const listeners = [];
+      const state = {
+        entries: [],
+        removed: [],
+        settings: { charset: 'text', batch: false, claimMode: 'manual', gapExtraMs: 0 },
+      };
+      // 后台真实行为是「写 storage → storage.onChanged → 所有面板重渲染」，替身照做一遍。
+      const notify = () => listeners.forEach((listener) => listener({ 'hb-state-v1': { newValue: state } }, 'local'));
+      globalThis.chrome = {
+        runtime: {
+          getManifest: () => ({ version: 'harness' }),
+          sendMessage: async (message) => {
+            sent.push(message);
+            if (message.type === 'hb:state:get') return { ok: true, state };
+            if (message.type === 'hb:state:patch') {
+              Object.assign(state.settings, message.patch.settings || {});
+              notify();
+              return { ok: true, state };
+            }
+            if (message.type === 'hb:request') return { ok: false, error: '请求代理尚未实现（里程碑 3）' };
+            return { ok: false, error: '未知消息：' + String(message.type) };
+          },
+        },
+        storage: { onChanged: { addListener: (listener) => listeners.push(listener) } },
+        tabs: { create: () => {} },
+        windows: { getCurrent: async () => ({ id: 1 }) },
+        sidePanel: { open: async () => {} },
+      };
+    </script>
+    <script src="browser-shim.js"></script>
+    <script src="code-rules.js"></script>
+    <script src="panel.js"></script>
+    <script>
+      (async () => {
+        const passed = [];
+        const failed = [];
+        const check = (name, ok, detail) => {
+          (ok ? passed : failed).push((ok ? 'PASS ' : 'FAIL ') + name + (detail ? ' → ' + detail : ''));
+        };
+        const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+        const input = () => document.getElementById('hb-input');
+        const textarea = () => document.getElementById('hb-textarea');
+        const submit = () => document.getElementById('hb-submit');
+        const counter = () => document.getElementById('hb-count');
+        const hint = () => document.getElementById('hb-hint');
+        const click = (node) => node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        const type = (field, value) => {
+          field.value = value;
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+        };
+        const paste = (field, text) => {
+          const event = new Event('paste', { bubbles: true, cancelable: true });
+          Object.defineProperty(event, 'clipboardData', { value: { getData: () => text } });
+          field.dispatchEvent(event);
+        };
+        const TICK = String.fromCharCode(96);
+        const share = (code) => '我向你分享了一个LDC红包，打开 ' + TICK + 'hb.unsnow.org' + TICK
+          + ' ，输入口令 ' + TICK + code + TICK + ' 领取';
+
+        try {
+          globalThis.HBPanel.mount(document.getElementById('app'), { allowSidePanelOpen: true });
+          await tick();
+          await tick();
+
+          check('面板渲染出输入框', Boolean(input()) && input().hidden === false);
+          check('批量输入框初始隐藏', textarea().hidden === true);
+          check('初始计数 0/18', counter().textContent === '0/18', counter().textContent);
+          check('空草稿禁用提交', submit().disabled === true);
+
+          type(input(), '  新年 快乐发财 ');
+          check('输入即时清洗', input().value === '新年快乐发财', input().value);
+          check('计数跟随草稿', counter().textContent === '6/18', counter().textContent);
+          check('合法口令启用提交', submit().disabled === false);
+
+          input().value = '';
+          paste(input(), share('11775521'));
+          check('粘贴分享文案只留口令', input().value === '11775521', input().value);
+
+          click(document.querySelector('[data-switch="charset"]'));
+          await tick();
+          check('切到数字模式', document.querySelector('[data-switch="charset"]').getAttribute('aria-checked') === 'true');
+          check('数字模式占位提示', input().placeholder === '8 位数字（0–9）', input().placeholder);
+          check('设置改动写入后台',
+            sent.some((message) => message.type === 'hb:state:patch' && message.patch.settings.charset === 'numeric'));
+
+          type(input(), '1177552199x');
+          check('数字模式按 8 位截断', input().value === '11775521', input().value);
+
+          click(document.querySelector('[data-switch="batch"]'));
+          await tick();
+          check('切到批量模式', textarea().hidden === false && input().hidden === true);
+          check('草稿搬到批量输入框', textarea().value === '11775521', textarea().value);
+
+          paste(textarea(), share('11775521') + '\n' + share('87654321'));
+          check('批量粘贴逐行取出口令', textarea().value === '11775521\n87654321', textarea().value);
+
+          document.getElementById('hb-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+          await tick();
+          await tick();
+          const request = sent.find((message) => message.type === 'hb:request');
+          check('提交把两条口令交给后台', Boolean(request) && request.codes.length === 2,
+            JSON.stringify(request && request.codes));
+          check('提交结果如实回报未实现', /请求代理尚未实现/.test(hint().textContent), hint().textContent);
+
+          click(document.querySelector('[data-switch="batch"]'));
+          await tick();
+          click(document.querySelector('[data-switch="charset"]'));
+          await tick();
+          type(input(), 'abc12');
+          check('短口令禁用提交', submit().disabled === true && /不足 6 个字符/.test(submit().title), submit().title);
+        } catch (error) {
+          failed.push('FAIL 抛出异常 → ' + String(error && error.stack || error));
+        }
+
+        document.getElementById('harness-result').textContent =
+          'PASS ' + passed.length + ' / FAIL ' + failed.length + '\n' + passed.concat(failed).join('\n');
+        document.title = failed.length ? 'HARNESS-FAIL' : 'HARNESS-PASS';
+      })();
+    </script>
+  </body>
+</html>

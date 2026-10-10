@@ -15,6 +15,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -68,6 +72,89 @@ main {
 .hb-version {
   color: var(--hb-text-tertiary);
   font-size: 11px;
+}
+
+/* 口令输入区：标题栏开关（单个/批量、文本/数字）+ 输入框 + 拆红包。 */
+.hb-input-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hb-switch {
+  display: inline-flex;
+  padding: 1px;
+  border: 1px solid var(--hb-border);
+  border-radius: 999px;
+  background: var(--hb-card);
+  font: inherit;
+  cursor: pointer;
+}
+
+.hb-switch:hover {
+  border-color: var(--hb-text-tertiary);
+}
+
+.hb-switch-option {
+  padding: 1px 9px;
+  border-radius: 999px;
+  color: var(--hb-text-secondary);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.hb-switch-option.is-active {
+  background: var(--hb-bg);
+  color: var(--hb-text);
+  font-weight: 600;
+}
+
+.hb-field {
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--hb-border);
+  border-radius: 6px;
+  background: var(--hb-bg);
+  color: var(--hb-text);
+  font: inherit;
+  letter-spacing: 0.02em;
+}
+
+.hb-field::placeholder {
+  color: var(--hb-text-tertiary);
+  letter-spacing: 0;
+}
+
+.hb-field:focus {
+  border-color: var(--hb-gold);
+  outline: none;
+}
+
+.hb-field--batch {
+  min-height: 62px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.hb-submit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 拆红包只包裹自身文字并靠左，字数提示贴同一行右侧。 */
+.hb-submit {
+  flex: none;
+  padding: 6px 16px;
+}
+
+.hb-count {
+  margin-left: auto;
+  color: var(--hb-text-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .hb-card {
@@ -195,6 +282,13 @@ main {
 .hb-button--primary:hover {
   border-color: #a94f4f;
   background: #a94f4f;
+}
+
+.hb-button:disabled {
+  border-color: var(--hb-border);
+  background: var(--hb-bg);
+  color: var(--hb-text-tertiary);
+  cursor: not-allowed;
 }
 
 .hb-hint {

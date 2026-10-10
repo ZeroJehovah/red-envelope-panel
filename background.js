@@ -56,7 +56,8 @@ async function patchState(patch) {
 // hb:ping         → { ok, version }
 // hb:state:get    → { ok, state }
 // hb:state:patch  → { ok, state }（patch 只接受 entries/removed 整体替换与 settings 合并）
-// hb:request      → 里程碑 3 实现，当前明确拒绝，避免面板误以为已经发出请求
+// hb:request      → 里程碑 3 实现（载荷 { codes: [{ code, charset }], claimMode }），
+//                   当前明确拒绝，避免面板误以为已经发出请求
 async function handleMessage(message) {
   switch (message?.type) {
     case 'hb:ping':
