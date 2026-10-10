@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "linux.do - hb.unsnow.org 红包口令面板",
+  "version": "0.1.0",
+  "description": "在扩展弹出面板或常显侧边栏提交 hb.unsnow.org 红包口令，沿用论坛脚本的古法/协议领取、批量队列与历史记录。",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "storage",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "https://hb.unsnow.org/*",
+    "https://linux.do/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; img-src 'self' data:; connect-src 'self' https://hb.unsnow.org"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://linux.do/*"],
+      "js": ["browser-shim.js", "content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_title": "hb.unsnow.org 红包口令面板",
+    "default_popup": "popup.html"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

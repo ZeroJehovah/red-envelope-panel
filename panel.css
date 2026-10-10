@@ -1,0 +1,208 @@
+/* 弹出面板与常显侧边栏共用样式。配色遵循 docs/AGENTS.md 的莫兰迪色系。 */
+:root {
+  --hb-bg: #f3efe8;
+  --hb-card: #fbfaf7;
+  --hb-border: #e5e0d7;
+  --hb-text: #45413b;
+  --hb-text-secondary: #9a917f;
+  --hb-text-tertiary: #b3aa99;
+  --hb-red: #c05c5c;
+  --hb-gold: #c98f4b;
+  --hb-green: #7e9a7a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+}
+
+body {
+  background: var(--hb-bg);
+  color: var(--hb-text);
+  font: 13px/1.5 "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+body.hb-popup {
+  width: 320px;
+}
+
+body.hb-sidepanel {
+  min-height: 100vh;
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+
+.hb-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hb-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.hb-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.hb-subtitle {
+  color: var(--hb-text-secondary);
+  font-size: 11px;
+}
+
+.hb-version {
+  color: var(--hb-text-tertiary);
+  font-size: 11px;
+}
+
+.hb-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--hb-border);
+  border-radius: 8px;
+  background: var(--hb-card);
+}
+
+.hb-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--hb-text-secondary);
+  font-size: 12px;
+}
+
+.hb-stat b {
+  margin-right: 2px;
+  color: var(--hb-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.hb-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hb-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hb-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.hb-status {
+  flex: none;
+  font-size: 11px;
+}
+
+.hb-status--idle {
+  color: var(--hb-text-secondary);
+}
+
+.hb-status--gold {
+  color: var(--hb-gold);
+}
+
+.hb-status--green {
+  color: var(--hb-green);
+}
+
+.hb-status--red {
+  color: var(--hb-red);
+}
+
+.hb-status--muted {
+  color: var(--hb-text-tertiary);
+}
+
+.hb-empty {
+  margin: 0;
+  color: var(--hb-text-tertiary);
+  font-size: 12px;
+}
+
+.hb-meta {
+  gap: 6px;
+}
+
+.hb-meta-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.hb-meta-label {
+  color: var(--hb-text-secondary);
+}
+
+.hb-meta-value {
+  color: var(--hb-text);
+}
+
+.hb-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.hb-button {
+  flex: 1;
+  padding: 7px 10px;
+  border: 1px solid var(--hb-border);
+  border-radius: 6px;
+  background: var(--hb-card);
+  color: var(--hb-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.hb-button:hover {
+  border-color: var(--hb-text-tertiary);
+}
+
+.hb-button--primary {
+  border-color: var(--hb-red);
+  background: var(--hb-red);
+  color: #fdfaf6;
+}
+
+.hb-button--primary:hover {
+  border-color: #a94f4f;
+  background: #a94f4f;
+}
+
+.hb-hint {
+  margin: 0;
+  color: var(--hb-text-tertiary);
+  font-size: 11px;
+}
+
+.hb-hint:empty {
+  display: none;
+}
