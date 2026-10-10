@@ -35,7 +35,7 @@ src/
 - **协议层**：端点、错误文案与结果行集中在 `hb-protocol.js`（暴露 `globalThis.HBProtocol`），后台与 `node --test` 共用；文案按脚本版移植，改文案只改这一处。
 - **网络**：只允许访问 `https://hb.unsnow.org`；跨域请求只能由后台 service worker 发起（`credentials: 'include'` 携带会话 Cookie，15 秒超时），扩展页面不得直接请求。
 - **面板结构**：`panel.js` / `panel.css` 按脚本版 `ensurePanel()` 1:1 复刻（头部两个开关与三个图标按钮、可折叠的配置面板、输入区与「拆红包」＋字数提示、暂停横幅与「恢复执行」、历史头与逐行动作、点击历史口令填入输入框）。「悬浮/停靠」分别映射到点图标弹出的面板与浏览器常显侧边栏，窗口的位置与尺寸交给浏览器，不要重新引入脚本版的拖拽与八向缩放手柄。
-- **详情卡片**：红包详情（金额、领取进度与记录、抽奖倒计时与名单）由 `envelope.js` 挂在面板页面内的 shadow DOM 宿主 `#hb-envelope-host` 上，一次只显示一张卡片；不向浏览的网页注入任何 DOM 或样式。卡片头像只从 `hb.unsnow.org` 来源加载，其他一律回落到内联 SVG data URI。卡片按面板可用尺寸铺满（`width: min(560px, 100%)`、高度上限 760px、`--envelope-zoom` 恒为 1），且卡片本体只有一层：`createNode()` 已经建出 `.redpacket-envelope`，markup 里不得再套同名 class。
+- **详情卡片**：红包详情（金额、领取进度与记录、抽奖倒计时与名单）由 `envelope.js` 挂在面板页面内的 shadow DOM 宿主 `#hb-envelope-host` 上，一次只显示一张卡片；不向浏览的网页注入任何 DOM 或样式。卡片头像只从 `hb.unsnow.org` 来源加载，其他一律回落到内联 SVG data URI。卡片保持**原尺寸**（原站 320×520、抽奖卡 420×640，再乘原站 1.2 倍缩放），窗口不够大就加大窗口而不是缩卡片：`--envelope-zoom` 恒为 1.2，不要引入原站那条窄屏/矮屏的 0.8 倍降级。卡片本体只有一层：`createNode()` 已经建出 `.redpacket-envelope`，markup 里不得再套同名 class。宿主是固定定位、盖住整个面板的一层，**关闭卡片时必须连宿主一起撤掉**（`host.remove()`）并让 `:host` 在无卡片时 `pointer-events: none`，否则留下一层透明宿主会把面板的点击整个吞掉。
 - **写请求来源**：站点 POST 接口只认自己那一个 `Origin`，扩展自动附带的 `Origin: chrome-extension://<id>` 会被回 403「请求来源不合法」。因此清单常带 `declarativeNetRequestWithHostAccess` 权限与 `rules.json`（改写 `https://hb.unsnow.org/api/` 的 `Origin`/`Referer`）；两者必须在同一次改动里保持同步，`tests/manifest.test.cjs` 会守住这条。
 - **站点无关**：不注册内容脚本、不注入页面 DOM 或样式、不依赖任何浏览站点的 DOM 结构；可选的站点内嵌模式必须单独引入权限并在此处登记。
 - **状态**：`chrome.storage.local` 的 `hb-state-v1` 是唯一真实来源；所有写入必须经后台消息接口，扩展页面不做本地副本。
@@ -82,7 +82,7 @@ src/
 
 - Chrome：`chrome://extensions` → 开发者模式 → 「加载已解压的扩展程序」选择 `src/`。
 - 静态自检：在 `src/` 下执行 `node --test`（清单与引用文件、口令规则用例，以及后台集成自检：vm 沙箱 + 假时钟 + 假 `fetch` 驱动真实消息契约）。
-- 面板 DOM 自检：把 `tests/panel-harness.html` 复制到扩展产物目录（与 `manifest.json` 同级），用 Chrome 打开或用无头模式 `--dump-dom` 运行；标题为 `HARNESS-PASS`、`#harness-result` 里 `FAIL 0` 即通过。该文件只用于开发期，不随扩展发布。
+- 面板 DOM 自检：把 `tests/panel-harness.html` 复制到扩展产物目录（与 `manifest.json` 同级），用 Chrome 打开或用无头模式 `--dump-dom` 运行（`--window-size=560,900`；窗口至少 424×668 卡片才会铺到原尺寸 384×624，更小的窗口只验证宽度，高度按视口推算）；标题为 `HARNESS-PASS`、`#harness-result` 里 `FAIL 0` 即通过。该文件只用于开发期，不随扩展发布。
 
 ## 产物同步（强制）
 

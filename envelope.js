@@ -202,6 +202,11 @@
     stopPolling(current);
     current.node.remove();
     if (overlay) overlay.classList.remove('active');
+    // 宿主是固定定位、盖住整个面板的层：关掉卡片后必须连它一起撤掉，
+    // 否则留一层透明宿主在 DOM 里，面板的点击会被它整个吞掉（打开下一张卡片时重建）。
+    if (host) host.remove();
+    host = null;
+    overlay = null;
     if (typeof current.onClose === 'function') {
       try {
         current.onClose();

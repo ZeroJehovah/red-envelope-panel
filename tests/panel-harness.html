@@ -5,8 +5,10 @@
      D:\Green Files\chrome plugins\red-envelope-panel\），再用 Chrome 打开；页面用最小
      chrome API 替身挂载 panel.js，跑完把结果写进 #harness-result，标题变为 HARNESS-PASS / HARNESS-FAIL。
 
-     无头运行示例（Windows 版 Chrome for Testing）：
+     无头运行示例（Windows 版 Chrome for Testing；窗口至少 424×668，卡片才会铺到原尺寸
+     384×624，否则只验证宽度，高度按视口推算）：
        chrome.exe --headless=new --disable-gpu --virtual-time-budget=5000 \
+         --window-size=560,900 \
          --user-data-dir="D:\Green Files\ChromeForTestingProfiles\panel-harness" \
          --dump-dom "file:///D:/Green%20Files/chrome%20plugins/red-envelope-panel/panel-harness.html"
 -->
@@ -138,6 +140,11 @@
         const row = (id) => document.querySelector('#hb-list .hb-entry[data-id="' + id + '"]');
         const rows = () => document.querySelectorAll('#hb-list .hb-entry');
         const click = (node) => node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        // 元素中心点上真正吃点击的是谁：用来验证关掉卡片后面板没有被透明宿主盖住。
+        const centerProbe = (node) => {
+          const box = node.getBoundingClientRect();
+          return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+        };
         const type = (field, value) => {
           field.value = value;
           field.dispatchEvent(new Event('input', { bubbles: true }));
@@ -331,6 +338,25 @@
           check('卡片只有一层外壳',
             Boolean(card()) && card().querySelectorAll('.redpacket-envelope').length === 0
             && Boolean(card().parentElement) && card().parentElement.classList.contains('modal-overlay'));
+          // 原尺寸＝原站 320×520 再乘 1.2 倍缩放：宽度恒为 384（窗口够宽时），
+          // 高度是 min(624, 视口高 - 上下留白 44)，所以按视口推算期望值，换窗口大小也不误报。
+          const cardBox = card() ? card().getBoundingClientRect() : { width: 0, height: 0 };
+          const cardW = Math.round(cardBox.width);
+          const cardH = Math.round(cardBox.height);
+          const wantW = window.innerWidth >= 440 ? 384 : Math.round((window.innerWidth - 40) / 1.2 * 1.2);
+          const wantH = Math.min(624, Math.round(window.innerHeight - 44));
+          check('卡片保持原尺寸（原站 320×520 乘 1.2 倍）',
+            Math.abs(cardW - wantW) <= 1 && Math.abs(cardH - wantH) <= 1,
+            cardW + '×' + cardH + '，期望 ' + wantW + '×' + wantH + ' @ ' + window.innerWidth + '×' + window.innerHeight);
+          // 回归：宿主是固定定位、盖住整个面板的元素，关掉卡片后必须彻底让路，
+          // 否则面板会被一层透明宿主吞掉点击（表现为「关掉红包后面板点不动」）。
+          globalThis.HBEnvelope.close();
+          await tick();
+          const probe = centerProbe(document.getElementById('hb-input'));
+          check('关掉卡片后面板恢复可点击',
+            Boolean(probe) && document.getElementById('app').contains(probe),
+            probe ? (probe.id || probe.className || probe.tagName) : 'null');
+          check('关掉卡片后宿主不留在 DOM 里', document.getElementById('hb-envelope-host') === null);
           check('已完结行只给删除动作',
             Boolean(row('done-1').querySelector('button[data-action="delete"]'))
             && !row('done-1').querySelector('button[data-action="void"]'));

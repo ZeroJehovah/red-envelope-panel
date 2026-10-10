@@ -36,13 +36,17 @@ body {
   font: 13px/1.55 "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
-/* 悬浮形态：点扩展图标弹出的面板；窗口尺寸由浏览器按内容决定。 */
+/* 悬浮形态：点扩展图标弹出的面板，窗口尺寸由浏览器按内容决定（Chrome 上限 800×600）。
+   宽度按面板里最大的那张卡片留位：抽奖卡 420 再乘原站 1.2 倍缩放 = 504，加两侧 20px 边距
+   需 544，取 560 留余量；常规卡片显示尺寸 384×624 自然放得下。高度顶到浏览器上限，
+   卡片太高时由卡片自己的 min(520px, 可用高度) 收住，不缩卡片。 */
 body.hb-popup {
-  width: 420px;
+  width: 560px;
+  min-height: 600px;
 }
 
 body.hb-popup main {
-  max-height: 580px;
+  max-height: 576px;
 }
 
 /* 停靠形态：常显侧边栏，纵向占满侧边栏，列表吃掉剩余高度。 */
@@ -367,7 +371,7 @@ main {
 }
 
 body.hb-popup .hb-list {
-  max-height: 240px;
+  max-height: 360px;
 }
 
 .hb-list:hover,

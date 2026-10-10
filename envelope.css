@@ -8,8 +8,10 @@
  * 卡片挂在面板页面自己的影子 DOM 里，因此这份样式只作用于面板内部，也不会与
  * panel.css 的莫兰迪样式互相污染。脚本版的多层堆叠（.envelope-slot / 计数 / 全部关闭）
  * 是为同时展示多张卡片准备的，面板一次只看一张，未移植。
- * 尺寸也按面板调整：原站是 320×520 再乘 1.2 倍缩放，面板里改为铺满可用宽度
- * （宽 560 上限、高 760 上限，zoom 恒为 1），窄屏与矮屏不再二次缩小。
+ * 尺寸保持原样：卡片本身 320×520（抽奖卡 420×640），再按原站的 1.2 倍缩放显示
+ * （即常规卡片显示为 384×624），面板窗口按这个尺寸留位——弹出面板宽度与高度都加大，
+ * 高度不够时由 `min(520px, 可用高度)` 收住，不缩卡片本身。原站在窄屏/矮屏上额外
+ * 把缩放降到 .8，面板里不采用：面板的窗口大小可以调，卡片比例不调。
  */
 :host {
   --bg-primary: #ffffff;
@@ -63,6 +65,8 @@
   max-height: 100dvh;
   z-index: 1001;
   display: block;
+  /* 卡片没开时宿主不该挡面板：命中交给 .modal-overlay.active 自己打开。 */
+  pointer-events: none;
   color-scheme: light;
   font: 14px/1.5 var(--font-body);
   color: var(--text-primary);
@@ -78,15 +82,15 @@ button:focus-visible {
 }
 
 .modal-overlay {
-  /* 面板形态差异：卡片在面板里铺满可用宽度，不再按原站的 320px 缩放（1:1 移植时是 1.2）。 */
-  --envelope-zoom: 1;
-  --edge-top: max(8px, env(safe-area-inset-top, 0px));
-  --edge-bottom: max(8px, calc(env(safe-area-inset-bottom, 0px) + 8px));
+  /* 缩放沿用原站（1.2）：卡片按原尺寸 320×520 设计，显示为 384×624。 */
+  --envelope-zoom: 1.2;
+  --edge-top: max(20px, env(safe-area-inset-top, 0px));
+  --edge-bottom: max(24px, calc(env(safe-area-inset-bottom, 0px) + 20px));
   --edge-side: max(12px, env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
   position: fixed;
   inset: 0;
   z-index: 1000;
-  padding: 8px;
+  padding: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -119,8 +123,8 @@ button:focus-visible {
 /* 原站 Credit 红包的配色与比例。 */
 .redpacket-envelope {
   position: relative;
-  width: min(560px, 100%);
-  height: min(760px, calc(100dvh - var(--edge-top) - var(--edge-bottom)));
+  width: min(320px, 100%);
+  height: min(520px, calc((100dvh - var(--edge-top) - var(--edge-bottom)) / var(--envelope-zoom)));
   padding: 34px 24px 24px;
   border: 0;
   border-radius: 12px;
@@ -467,8 +471,8 @@ button:focus-visible {
 }
 
 .redpacket-envelope.is-lottery {
-  width: min(560px, 100%);
-  height: min(760px, calc(100dvh - var(--edge-top) - var(--edge-bottom)));
+  width: min(420px, 100%);
+  height: min(640px, calc((100dvh - var(--edge-top) - var(--edge-bottom)) / var(--envelope-zoom)));
   padding: 0;
   background: var(--bg-card);
   color: var(--text-primary);
@@ -707,16 +711,16 @@ button:focus-visible {
 
 .modal-overlay .redpacket-envelope {
   zoom: var(--envelope-zoom);
-  max-height: calc(100dvh - var(--edge-top) - var(--edge-bottom));
+  max-height: calc((100dvh - var(--edge-top) - var(--edge-bottom)) / var(--envelope-zoom));
 }
 
-/* 面板本来就窄，不再像原站那样在窄屏/矮屏上再缩一圈（zoom 恒为 1）。 */
+/* 矮屏时卡片自己的内容能滚；缩放不降级（原站这一步会把缩放再降到 0.8 倍），
+   面板的窗口尺寸可以调大，卡片比例不缩。 */
 @media (max-width: 768px), (max-height: 600px) {
   .envelope-details { overflow-y: auto; overscroll-behavior: contain; }
   #envelope-opened-view > :not(.envelope-claims-list) { flex-shrink: 0; }
   .envelope-claims-list { min-height: 48px; }
   .envelope-close-btn { min-height: 55px; }
-  .redpacket-envelope.is-lottery { height: min(760px, calc(100dvh - var(--edge-top) - var(--edge-bottom))); }
   .envelope-dismiss { top: 0; right: 0; width: 55px; height: 55px; display: grid; place-items: center; }
 }
 

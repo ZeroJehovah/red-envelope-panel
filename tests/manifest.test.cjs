@@ -134,10 +134,33 @@ test('面板按脚本版侧边栏的结构复刻控件', () => {
   assert.match(readFileSync(join(root, 'sidepanel.js'), 'utf8'), /shell: 'sidebar'/);
 });
 
-test('红包卡片在面板里按可用尺寸铺满', () => {
+test('红包卡片保持原尺寸，弹出面板按卡片留位', () => {
   const css = readFileSync(join(root, 'envelope.css'), 'utf8');
-  // 原站是 320×520 再乘 1.2 倍，面板里改成铺满可用宽度并取消二次缩小。
-  assert.match(css, /width: min\(560px, 100%\)/);
-  assert.match(css, /--envelope-zoom: 1;/);
-  assert.equal(/--envelope-zoom: \.8/.test(css), false, '面板里不该再按窗口尺寸缩小卡片');
+  // 卡片尺寸沿用原站：320×520 再乘 1.2 倍缩放（常规则显示为 384×624），抽奖卡 420×640。
+  assert.match(css, /width: min\(320px, 100%\)/, '卡片不再是原站的 320 基准宽');
+  assert.match(css, /height: min\(520px, calc\(\(100dvh - var\(--edge-top\) - var\(--edge-bottom\)\) \/ var\(--envelope-zoom\)\)\)/, '卡片不再是原站的 520 基准高');
+  assert.match(css, /width: min\(420px, 100%\)/, '抽奖卡不再是原站的 420 基准宽');
+  assert.match(css, /--envelope-zoom: 1\.2;/, '卡片缩放不再是原站的 1.2 倍');
+  assert.equal(/--envelope-zoom: \.8/.test(css), false, '面板里不该按窗口尺寸缩小卡片，窗口该加大');
+  // 窗口不够大就加大面板：宽度要容下最大的卡片（504 + 两侧 20px 边距）。
+  const panel = readFileSync(join(root, 'panel.css'), 'utf8');
+  const popup = /body\.hb-popup \{[^}]*\}/.exec(panel);
+  assert.ok(popup, '面板样式里缺少弹出面板外壳规则');
+  const width = /width: (\d+)px/.exec(popup[0]);
+  assert.ok(width && Number(width[1]) >= 544, '弹出面板宽度放不下原尺寸的卡片：' + (width && width[1]));
+  const height = /min-height: (\d+)px/.exec(popup[0]);
+  assert.ok(height && Number(height[1]) >= 600, '弹出面板高度放不下原尺寸的卡片：' + (height && height[1]));
+});
+
+test('关掉红包卡片后面板还能点', () => {
+  // 宿主是固定定位、盖住整个面板的一层，关卡片时不撤掉就会吞掉面板的全部点击
+  // （回归 bug：弹出红包再关闭，面板点不动，重开面板才恢复）。
+  const js = readFileSync(join(root, 'envelope.js'), 'utf8');
+  assert.match(js, /if \(host\) host\.remove\(\)/, '关闭卡片时没有撤掉宿主层');
+  assert.match(js, /host = null;\s*\n\s*overlay = null;/, '关闭卡片后没有清掉宿主与遮罩引用');
+  const css = readFileSync(join(root, 'envelope.css'), 'utf8');
+  const host = Array.from(css.matchAll(/:host \{[^}]*\}/g), (match) => match[0])
+    .find((block) => block.includes('all: initial'));
+  assert.ok(host, '样式里缺少 :host 基础规则');
+  assert.match(host, /pointer-events: none/, '宿主层没有让开指针事件');
 });
