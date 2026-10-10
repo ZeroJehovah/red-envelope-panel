@@ -1,0 +1,720 @@
+/* 红包详情卡片（信封弹窗）样式。
+ *
+ * 移植自脚本版 browser/userscripts/linuxdo-hongbao-code-sidebar.user.js（v2.35.0）的
+ * ENVELOPE_STYLE / ENVELOPE_AUX_STYLE：色值与比例沿用 hb.unsnow.org 原站的红/金信封，
+ * 属于 docs/AGENTS.md 配色规范里「红包卡片内部例外」。
+ *
+ * 形态差异：脚本版把卡片挂在页面宿主（:host 覆盖整个网页）里；插件没有内容脚本，
+ * 卡片挂在面板页面自己的影子 DOM 里，因此这份样式只作用于面板内部，也不会与
+ * panel.css 的莫兰迪样式互相污染。脚本版的多层堆叠（.envelope-slot / 计数 / 全部关闭）
+ * 是为同时展示多张卡片准备的，面板一次只看一张，未移植。
+ */
+:host {
+  --bg-primary: #ffffff;
+  --bg-card: #ffffff;
+  --bg-muted: #f4f4f5;
+  --bg-sidebar: #fafafa;
+  --text-primary: #18181b;
+  --text-secondary: #71717a;
+  --text-tertiary: #a1a1aa;
+  --accent-blue: #dc2626;
+  --accent-blue-hover: #b91c1c;
+  --accent-red: #ef4444;
+  --accent-red-hover: #dc2626;
+  --success-color: #10b981;
+  --error-color: #ef4444;
+  --warning-color: #eab308;
+  --border-color: #e4e4e7;
+  --border-light: #f4f4f5;
+  --postit-yellow: #f4f4f5;
+  --radius: 10px;
+  --wobbly-radius-lg: 12px;
+  --wobbly-radius-md: 8px;
+  --wobbly-radius-sm: 6px;
+  --shadow-hard: 0 1px 2px rgba(24, 24, 27, 0.05);
+  --shadow-hard-hover: 0 2px 8px rgba(24, 24, 27, 0.08);
+  --shadow-hard-small: 0 1px 3px rgba(24, 24, 27, 0.08);
+  --font-heading: "Noto Sans SC", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-body: "Noto Sans SC", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --duration-fast: 150ms;
+  --duration-base: 220ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --visual-viewport-bottom: 0px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-body);
+  letter-spacing: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+}
+
+:host {
+  all: initial;
+  position: fixed;
+  inset: 0;
+  max-height: 100dvh;
+  z-index: 1001;
+  display: block;
+  color-scheme: light;
+  font: 14px/1.5 var(--font-body);
+  color: var(--text-primary);
+}
+
+button {
+  font: inherit;
+}
+
+button:focus-visible {
+  outline: 3px solid rgba(220, 38, 38, 0.24);
+  outline-offset: 2px;
+}
+
+.modal-overlay {
+  --envelope-zoom: 1.2;
+  --edge-top: max(20px, env(safe-area-inset-top, 0px));
+  --edge-bottom: max(24px, calc(env(safe-area-inset-bottom, 0px) + 20px));
+  --edge-side: max(12px, env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--duration-base) ease;
+}
+
+/* 原站 PhotoSwipe 的遮罩（--pswp-bg: #000，opened bgOpacity: 0.8）。
+   把不透明度放在单独一层上，信封本身保持完全不透明。 */
+.modal-overlay::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: #000;
+  opacity: 0.8;
+  transform: translateZ(0);
+  will-change: opacity;
+  pointer-events: none;
+}
+
+.modal-overlay.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 原站 Credit 红包的配色与比例。 */
+.redpacket-envelope {
+  position: relative;
+  width: min(320px, 100%);
+  height: min(520px, calc((100dvh - var(--edge-top) - var(--edge-bottom)) / var(--envelope-zoom)));
+  padding: 34px 24px 24px;
+  border: 0;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  overflow: hidden;
+  color: #fae5ae;
+  background: #f25542;
+  box-shadow: 0 22px 60px rgba(24, 24, 27, 0.3);
+  opacity: 0;
+  transform: translateY(12px) scale(0.96);
+  transition: opacity 300ms ease, transform 300ms var(--ease-out);
+}
+
+.redpacket-envelope::before {
+  position: absolute;
+  top: 0;
+  right: -12%;
+  left: -12%;
+  height: 78%;
+  border-radius: 0 0 50% 50% / 0 0 12% 12%;
+  background: #e75240;
+  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.14);
+  content: "";
+}
+
+.redpacket-envelope::after {
+  display: none;
+}
+
+.modal-overlay.active .redpacket-envelope {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+#envelope-closed-view,
+.envelope-top,
+.envelope-open-btn,
+.envelope-footer {
+  position: relative;
+  z-index: 2;
+}
+
+.envelope-top {
+  width: 100%;
+  padding-top: 48px;
+  color: #fae5ae;
+  text-align: center;
+}
+
+.envelope-sender {
+  margin-bottom: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  opacity: 0.92;
+}
+
+.envelope-wish {
+  margin-bottom: 12px;
+  font-size: 19px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.envelope-creator-avatar {
+  width: 38px;
+  height: 38px;
+  margin: 0 auto;
+  border: 2px solid rgba(250, 229, 174, 0.8);
+  border-radius: 50%;
+  display: block;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.envelope-open-btn {
+  width: 70px;
+  height: 70px;
+  flex: 0 0 70px;
+  border: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  outline: none;
+  color: #a53a2d;
+  background: #fae5ae;
+  box-shadow: 0 3px 10px rgba(105, 37, 29, 0.22);
+  font-family: var(--font-heading);
+  font-size: 21px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  transition: transform var(--duration-base) ease, background var(--duration-fast) ease;
+}
+
+.envelope-open-btn:hover {
+  background: #fff0c8;
+  transform: scale(1.05);
+}
+
+.envelope-open-btn.spinning {
+  animation: spinCredit 800ms linear infinite;
+}
+
+@keyframes spinCredit {
+  to {
+    transform: rotateY(360deg);
+  }
+}
+
+.envelope-footer {
+  flex-shrink: 0;
+  color: #fae5ae;
+  font-size: 12px;
+  text-align: center;
+  opacity: 0.88;
+}
+
+.envelope-footer code,
+.envelope-footer span {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.envelope-details {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  width: 100%;
+  height: 100%;
+  padding: 22px 20px 20px;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  border-radius: 12px;
+  color: var(--text-primary);
+  background: var(--bg-card);
+  animation: creditPageIn 320ms ease-out both;
+}
+
+#envelope-opened-view .envelope-sender {
+  color: var(--text-primary);
+}
+
+#envelope-opened-view > div:first-child {
+  margin-top: 0 !important;
+}
+
+.details-amount {
+  margin: 12px 0 6px;
+  color: #cfb073;
+  font-size: 46px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.details-amount span {
+  margin-left: 4px;
+  color: #cfb073;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.details-status {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.envelope-result-overview {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.envelope-result-stat {
+  min-width: 0;
+  padding: 9px 10px;
+  border-radius: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: var(--bg-muted);
+  text-align: center;
+}
+
+.envelope-result-stat span {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.envelope-result-stat strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.envelope-claims-list {
+  width: 100%;
+  max-height: 150px;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.envelope-claim-row {
+  min-height: 32px;
+  padding: 5px 2px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+}
+
+.envelope-claim-row:last-child {
+  border-bottom: 0;
+}
+
+.envelope-claim-user {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.envelope-claim-user img {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.envelope-claim-user span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.envelope-claim-row strong {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.envelope-claim-amount {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.envelope-luckiest,
+.claim-luckiest {
+  color: var(--accent-blue);
+  font-family: var(--font-heading);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.envelope-claims-empty {
+  padding: 16px 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-align: center;
+}
+
+.envelope-close-btn {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 6px;
+  color: #ffffff;
+  background: #ef4444;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--duration-fast) ease, transform var(--duration-fast) ease;
+}
+
+.envelope-close-btn:hover {
+  background: #dc2626;
+}
+
+.envelope-close-btn:active {
+  transform: scale(0.98);
+}
+
+@keyframes creditPageIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.envelope-open-btn:disabled {
+  opacity: 0.5 !important;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.envelope-dismiss {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 10;
+  border: 0;
+  background: transparent;
+  color: #fae5ae;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.envelope-dismiss:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 抽奖卡片是浅色版式，与红包信封同尺寸约束。 */
+[hidden] {
+  display: none !important;
+}
+
+.redpacket-envelope.is-lottery {
+  width: min(420px, 100%);
+  height: min(640px, calc((100dvh - var(--edge-top) - var(--edge-bottom)) / var(--envelope-zoom)));
+  padding: 0;
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.redpacket-envelope.is-lottery::before {
+  display: none;
+}
+
+.lottery-view {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 24px 22px 18px;
+  gap: 14px;
+}
+
+.lottery-header {
+  flex: 0 0 auto;
+  text-align: center;
+}
+
+.lottery-header .envelope-sender {
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.lottery-header h3 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.lottery-countdown {
+  margin: 12px 0 8px;
+  font-size: 30px;
+  color: var(--accent-red);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.lottery-header p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+#lottery-personal {
+  color: var(--text-primary);
+}
+
+#lottery-connection {
+  display: block;
+  font-size: 10px;
+  color: var(--accent-red);
+}
+
+.lottery-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.lottery-scroll h4 {
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+#lottery-winners-section {
+  margin-bottom: 18px;
+}
+
+.lottery-person {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 2px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.lottery-person img {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: 0 0 30px;
+}
+
+.lottery-person-name {
+  min-width: 0;
+  flex: 1;
+}
+
+.lottery-person-name strong {
+  display: block;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.lottery-person small {
+  display: block;
+  font-size: 10px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.lottery-person-result {
+  text-align: right;
+  flex: 0 0 auto;
+}
+
+.lottery-person-result strong {
+  font-size: 12px;
+  color: var(--accent-red);
+}
+
+.lottery-actions {
+  display: flex;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.lottery-actions .btn {
+  flex: 1;
+}
+
+.lottery-empty {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 12px 0;
+}
+
+/* 按钮沿用原站 Credit 的 shadcn 变体。 */
+.btn {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 16px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #ffffff;
+  background: var(--accent-blue);
+  box-shadow: none;
+  font-family: var(--font-heading);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease, color var(--duration-fast) ease, transform var(--duration-fast) ease;
+}
+
+.btn:hover {
+  background: var(--accent-blue-hover);
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+.btn-primary {
+  color: #ffffff;
+  background: var(--accent-blue);
+}
+
+.btn-primary:hover {
+  background: var(--accent-blue-hover);
+}
+
+.btn-secondary {
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border-color: var(--border-color);
+  box-shadow: var(--shadow-hard);
+}
+
+.btn-secondary:hover {
+  color: var(--text-primary);
+  background: var(--bg-muted);
+  border-color: #d4d4d8;
+}
+
+.btn:disabled {
+  opacity: 0.5 !important;
+  cursor: not-allowed;
+  pointer-events: none;
+  transform: none !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  :host {
+    color-scheme: dark;
+    --bg-primary: #18181b;
+    --bg-card: #27272a;
+    --bg-muted: #3f3f46;
+    --bg-sidebar: #27272a;
+    --text-primary: #fafafa;
+    --text-secondary: #a1a1aa;
+    --text-tertiary: #71717a;
+    --border-color: rgba(255, 255, 255, 0.1);
+    --border-light: #3f3f46;
+    --postit-yellow: #3f3f46;
+    --shadow-hard: 0 1px 2px rgba(0, 0, 0, 0.18);
+    --shadow-hard-hover: 0 2px 8px rgba(0, 0, 0, 0.24);
+    --shadow-hard-small: 0 1px 3px rgba(0, 0, 0, 0.24);
+  }
+
+  .btn-secondary {
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .btn-secondary:hover {
+    background: var(--bg-muted);
+    border-color: rgba(255, 255, 255, 0.18);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+.modal-overlay .redpacket-envelope {
+  zoom: var(--envelope-zoom);
+  max-height: calc((100dvh - var(--edge-top) - var(--edge-bottom)) / var(--envelope-zoom));
+}
+
+@media (max-width: 768px), (max-height: 600px) {
+  .modal-overlay { --envelope-zoom: .8; }
+  .envelope-details { overflow-y: auto; overscroll-behavior: contain; }
+  #envelope-opened-view > :not(.envelope-claims-list) { flex-shrink: 0; }
+  .envelope-claims-list { min-height: 48px; }
+  .envelope-close-btn { min-height: 55px; }
+  .redpacket-envelope.is-lottery { height: min(720px, calc((100dvh - var(--edge-top) - var(--edge-bottom)) / var(--envelope-zoom))); }
+  .envelope-dismiss { top: 0; right: 0; width: 55px; height: 55px; display: grid; place-items: center; }
+}
+
+@media (max-height: 430px) {
+  .envelope-top { padding-top: 20px; }
+}
+

@@ -18,6 +18,8 @@ src/
 ├── background.js      # service worker：状态持有者、消息路由、请求代理、限速与队列
 ├── panel.js           # 弹出面板与侧边栏共用渲染器：口令输入区、队列与历史区（HBPanel.mount）
 ├── panel.css          # 面板共用样式（莫兰迪配色）
+├── envelope.js        # 面板内红包详情卡片（信封弹窗、领取记录、抽奖倒计时与名单，暴露 globalThis.HBEnvelope）
+├── envelope.css       # 卡片样式（挂进 #hb-envelope-host 的 shadow root，卡片内部沿用站点红/金配色）
 ├── popup.html/.js     # 点图标弹出面板的外壳
 ├── sidepanel.html/.js # 常显侧边栏的外壳
 ├── icons/             # 16/32/48/128 PNG（由 tools/make-icons.py 生成）
@@ -32,6 +34,7 @@ src/
 - **口令规则**：字符清洗、分享文案取词与校验集中在 `code-rules.js`（暴露 `globalThis.HBCodes`），面板与 `node --test` 共用同一份实现；规则按脚本版原样保留（含站点标识匹配），不要在两处各写一份。
 - **协议层**：端点、错误文案与结果行集中在 `hb-protocol.js`（暴露 `globalThis.HBProtocol`），后台与 `node --test` 共用；文案按脚本版移植，改文案只改这一处。
 - **网络**：只允许访问 `https://hb.unsnow.org`；跨域请求只能由后台 service worker 发起（`credentials: 'include'` 携带会话 Cookie，15 秒超时），扩展页面不得直接请求。
+- **详情卡片**：红包详情（金额、领取进度与记录、抽奖倒计时与名单）由 `envelope.js` 挂在面板页面内的 shadow DOM 宿主 `#hb-envelope-host` 上，一次只显示一张卡片；不向浏览的网页注入任何 DOM 或样式。卡片头像只从 `hb.unsnow.org` 来源加载，其他一律回落到内联 SVG data URI。
 - **写请求来源**：站点 POST 接口只认自己那一个 `Origin`，扩展自动附带的 `Origin: chrome-extension://<id>` 会被回 403「请求来源不合法」。因此清单常带 `declarativeNetRequestWithHostAccess` 权限与 `rules.json`（改写 `https://hb.unsnow.org/api/` 的 `Origin`/`Referer`）；两者必须在同一次改动里保持同步，`tests/manifest.test.cjs` 会守住这条。
 - **站点无关**：不注册内容脚本、不注入页面 DOM 或样式、不依赖任何浏览站点的 DOM 结构；可选的站点内嵌模式必须单独引入权限并在此处登记。
 - **状态**：`chrome.storage.local` 的 `hb-state-v1` 是唯一真实来源；所有写入必须经后台消息接口，扩展页面不做本地副本。
@@ -47,13 +50,15 @@ src/
 | `hb:state:get` | — | `{ ok, state }` |
 | `hb:state:patch` | `{ settings }` | `{ ok, state }`（settings 合并） |
 | `hb:submit` | `{ codes: [{ code, charset }], claimMode }` | `{ ok, added, state }` |
-| `hb:claim` | `{ id, trusted: true }` | `{ ok, state }` |
+| `hb:claim` | `{ id, trusted: true }` | `{ ok, state, outcome, packet }` |
+| `hb:packet` | `{ id, refresh }` | `{ ok, packet }`（先查内存缓存，`refresh: true` 才发一次只读 GET，绝不下写请求） |
 | `hb:void` / `hb:delete` / `hb:void-all` / `hb:clear` / `hb:resume` | `{ id }`（按需） | `{ ok, state }` |
-| `hb:session` | — | `{ ok, loggedIn, username }` |
+| `hb:session` | — | `{ ok, loggedIn, username, linuxdo_id }` |
 
 - 面板不直接写 storage：所有写入经这些消息进后台，重绘统一靠 `storage.onChanged`。
 - `hb:claim` 的授权由两侧共同保证：面板只在 `event.isTrusted` 的真实点击里发送，后台只认 `awaiting` 且 `packetId` 匹配的条目，并抢在发请求前把状态改成 `running`，因此一次点击只放行一次请求，重复点击会被挡下。
 - 领取失败或结果无法确认时条目落到 `failed` 并把队列置为暂停（`paused` / `pausedReason`），要用户核对后手动「继续队列」，不做自动重试。
+- 领取记录、参与者与中奖名单只存在后台内存（`livePackets`），随 worker 回收消失，不写进 `hb-state-v1`；卡片重开时按需用 `hb:packet` 的只读请求补回。持久化的 `packetSnapshot` 只留列表需要的字段。
 
 ## MV3 注意事项
 

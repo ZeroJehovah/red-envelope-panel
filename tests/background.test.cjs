@@ -437,6 +437,61 @@ test('提交非法口令被后台挡下', async () => {
   assert.equal(env.requests.length, 0);
 });
 
+test('详情卡片：领取回执带回结果与红包，详情按 id 只读读取', async () => {
+  const detail = {
+    ...ACTIVE_PACKET,
+    claimed_count: 2,
+    claims: [{ share_id: 7, username: 'carol', amount: 1.23, at: 2 }],
+  };
+  const env = await createEnv({
+    handler: (url) => {
+      if (url.endsWith('/api/me')) return sessionUser;
+      if (url.endsWith('/grab')) return { status: 200, body: { amount: 1.23 } };
+      if (url.endsWith('/api/hongbao/p1')) return { status: 200, body: detail };
+      if (url.endsWith('/api/hongbao/nope')) return { status: 404, body: { error: '红包不存在' } };
+      return { status: 200, body: ACTIVE_PACKET };
+    },
+  });
+  const submit = await env.send({ type: 'hb:submit', codes: [{ code: HAPPY_CODE, charset: 'text' }], claimMode: 'manual' });
+  await env.flush();
+  const id = submit.state.entries[0].id;
+
+  // 领取回执与当时那份红包一起回给面板，面板据此渲染金额与进度。
+  const claimed = await env.send({ type: 'hb:claim', id, trusted: true });
+  assert.equal(claimed.ok, true);
+  assert.equal(claimed.outcome.amount, 1.23);
+  assert.equal(claimed.packet.id, 'p1');
+  assert.equal(claimed.state.entries[0].result, '领取成功: +1.23 LDC');
+
+  // 内存里已经有这份红包：只读读取直接命中，不再发请求。
+  const cached = await env.send({ type: 'hb:packet', id: 'p1' });
+  assert.equal(cached.ok, true);
+  assert.equal(cached.packet.id, 'p1');
+  assert.equal(env.requests.filter((item) => item.url.endsWith('/api/hongbao/p1')).length, 0,
+    '内存里有红包快照时不发请求');
+
+  // refresh 走一次只读 GET，把领取记录补回来，而且不会发写请求。
+  const pending = env.send({ type: 'hb:packet', id: 'p1', refresh: true });
+  await env.advance(5000);
+  const fresh = await pending;
+  assert.equal(fresh.ok, true);
+  assert.deepEqual(plain(fresh.packet.claims.map((claim) => claim.username)), ['carol']);
+  assert.equal(env.requests.filter((item) => item.url.endsWith('/api/hongbao/p1')).length, 1);
+  assert.equal(env.requests.filter((item) => item.method === 'POST').length, 1, '详情读取不发写请求');
+
+  // 读不到（也没有缓存）时给一条可读的错误，面板照旧显示本地记录。
+  const missingPending = env.send({ type: 'hb:packet', id: 'nope', refresh: true });
+  await env.advance(5000);
+  const missing = await missingPending;
+  assert.equal(missing.ok, false);
+  assert.match(missing.error, /读不到红包详情/);
+
+  // 登录态带上 linuxdo_id：详情卡片用它判断「自己发的」与是否中奖。
+  const session = await env.send({ type: 'hb:session' });
+  assert.equal(session.loggedIn, true);
+  assert.equal(session.linuxdo_id, 2);
+});
+
 test('队列跑完后清掉兜底闹钟', async () => {
   const env = await createEnv({ handler: okQuery({ error: '口令不存在' }) });
   await env.send({ type: 'hb:submit', codes: [{ code: HAPPY_CODE, charset: 'text' }], claimMode: 'manual' });
@@ -486,6 +541,13 @@ test('古法抽奖：等手动参与，点击只报名一次，开奖后落到�
   assert.equal(state.state.entries[0].result, '已中奖: +5.00 LDC（已到账）');
   assert.equal(state.state.paused, false);
   assert.equal(env.requests.filter((item) => item.method === 'POST').length, 1, '看护不发写请求');
+
+  // 看护读回的开奖结果留在内存快照里：面板打开详情卡片时不用再发请求。
+  const before = env.requests.length;
+  const detail = await env.send({ type: 'hb:packet', id: 'L1' });
+  assert.equal(detail.ok, true);
+  assert.deepEqual(plain(detail.packet.winners.map((item) => item.amount)), [5]);
+  assert.equal(env.requests.length, before, '内存里已有开奖结果，不再发请求');
 });
 
 test('协议抽奖：后台自动报名并等开奖，不误报未确认', async () => {

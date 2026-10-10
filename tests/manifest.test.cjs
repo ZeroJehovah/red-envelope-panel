@@ -78,3 +78,22 @@ test('面板版本号来自清单而不是硬编码', () => {
   assert.match(panel, /getManifest\(\)\.version/);
   assert.equal(panel.includes("'" + manifest.version + "'"), false, 'panel.js 不应硬编码版本号');
 });
+
+test('红包详情卡片随包，头像只从红包站来源加载', () => {
+  for (const file of ['envelope.js', 'envelope.css']) {
+    assert.ok(existsSync(join(root, file)), file + ' 缺失');
+  }
+  for (const page of ['popup.html', 'sidepanel.html']) {
+    const html = readFileSync(join(root, page), 'utf8');
+    assert.match(html, /src="hb-protocol\.js"/, page + ' 未引入协议层');
+    assert.match(html, /src="envelope\.js"/, page + ' 未引入红包卡片');
+  }
+  // 卡片样式随包，不得出现 @import 或远程 url()。
+  const css = readFileSync(join(root, 'envelope.css'), 'utf8');
+  assert.equal(/@import|url\(\s*["']?https?:/i.test(css), false, '信封样式引用了远程资源');
+  // 头像是卡片里唯一的远程图形，必须锁死在红包站来源，其余用内联 SVG。
+  const js = readFileSync(join(root, 'envelope.js'), 'utf8');
+  assert.match(js, /HB_SITE_URL/, 'envelope.js 未使用红包站地址');
+  assert.match(js, /url\.origin !== site\.origin/, '头像来源没有做同源限制');
+  assert.match(js, /data:image\/svg\+xml/, '缺少内联 SVG 头像兜底');
+});

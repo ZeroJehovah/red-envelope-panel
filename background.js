@@ -296,6 +296,19 @@ async function packetSession() {
   return sessionPromise;
 }
 
+/* ------------------------------ 红包详情快照 ------------------------------ */
+
+// 面板的详情卡片要的是原始红包（含领取记录 claims、参与者 participants、中奖名单 winners），
+// 这些字段按约定不入库，只在当前这轮 worker 里留一份内存副本；worker 被回收后由面板
+// 按 id 重新读一次红包本身（只读 GET，与队列、看护共用同一份限速节奏）。
+const livePackets = new Map();
+
+function rememberPacket(packet) {
+  if (!P.validPacket(packet)) return null;
+  livePackets.set(String(packet.id), packet);
+  return packet;
+}
+
 /* --------------------------------- 领取 -------------------------------- */
 
 // 正在领取的条目：一次点击只放行一条请求，重复点击在这里被挡掉。
@@ -317,6 +330,8 @@ async function claimPacket(entry, packet) {
     sent = true;
     const response = await siteRequest(P.grabUrl(packet.id), 'POST');
     const receipt = P.claimReceipt(response, packet);
+    // 抽奖回执里带着刷新过的红包（含参与者名单），详情卡片直接读这一份。
+    if (P.validPacket(receipt.packet)) rememberPacket(receipt.packet);
     // 抽奖报名成功不是终局：条目停在 awaiting，由开奖看护轮询到开奖。
     if (receipt.joined) entry.packet = P.packetSnapshot(receipt.packet || { ...packet, joined: true });
     return { ...receipt, awaiting: receipt.joined === true, lines: match.concat(receipt.lines) };
@@ -341,6 +356,7 @@ async function runEntry(entry) {
   entry.packetId = String(packet.id);
   entry.matched = true;
   entry.packet = P.packetSnapshot(packet);
+  rememberPacket(packet);
   await commit();
 
   const user = await packetSession();
@@ -540,6 +556,8 @@ async function watchEntry(entry) {
     try {
       const response = await sharedQuery(P.packetUrl(packetId));
       fresh = response.status === 200 ? response.response : null;
+      // 看护每轮读回的红包就是最新的详情，顺手更新内存副本供面板读取。
+      if (P.validPacket(fresh) && String(fresh.id) === packetId) rememberPacket(fresh);
     } catch {
       // 查询失败不结束看护：下一次心跳接着试，直到收摊时刻。
     }
@@ -649,7 +667,29 @@ async function handleClaim(message) {
   const outcome = await claimPacket(entry, entry.packet);
   await settle(entry, outcome);
   if (!state.paused) scheduleTick();
-  return { ok: true, state: snapshot() };
+  // 回执与刷新过的红包一起回给面板：详情卡片据此渲染金额、进度与领取记录。
+  const key = String(entry.packet?.id || '');
+  return { ok: true, state: snapshot(), outcome, packet: livePackets.get(key) || null };
+}
+
+// 红包详情：面板打开卡片时按 id 读红包本身。内存里有（看护刚轮询过）就直接用，
+// 没有或要求 refresh 时补一次网络查询；这里永远是 GET，不会触发任何写请求。
+async function readPacket(id, refresh) {
+  const key = String(id || '');
+  if (!key) return { ok: false, error: '缺少红包 ID' };
+  let packet = livePackets.get(key) || null;
+  if (!packet || refresh === true) {
+    try {
+      const response = await sharedQuery(P.packetUrl(key));
+      const fresh = response.status === 200 && P.validPacket(response.response)
+        && String(response.response.id) === key ? response.response : null;
+      if (fresh) packet = rememberPacket(fresh);
+    } catch (error) {
+      // 网络失败时退回内存里已有的旧副本，让卡片至少能显示已缓存的字段。
+      if (!packet) return { ok: false, error: error instanceof Error ? error.message : '读取红包详情失败' };
+    }
+  }
+  return packet ? { ok: true, packet } : { ok: false, error: '暂时读不到红包详情，请到红包站核对' };
 }
 
 async function handleSubmit(message) {
@@ -692,8 +732,10 @@ async function handleSubmit(message) {
 // hb:state:patch  → { ok, state }（settings 合并）
 // hb:submit       → { ok, added, state }（载荷 { codes: [{ code, charset }], claimMode }）
 // hb:claim        → { ok, state }（载荷 { id, trusted: true }，真实点击授权后的一次性领取）
+//                   成功时附带 { outcome, packet }：面板详情卡片据此渲染领取金额与记录
+// hb:packet       → { ok, packet }（载荷 { id, refresh }，只读红包本身，供详情卡片刷新）
 // hb:void / hb:delete / hb:clear / hb:void-all / hb:resume → { ok, state }
-// hb:session      → { ok, loggedIn, username }
+// hb:session      → { ok, loggedIn, username, linuxdo_id }
 async function handleMessage(message) {
   await getState();
   switch (message?.type) {
@@ -713,6 +755,8 @@ async function handleMessage(message) {
       return handleSubmit(message);
     case 'hb:claim':
       return handleClaim(message);
+    case 'hb:packet':
+      return readPacket(message.id, message.refresh === true);
     case 'hb:void':
       return { ok: true, state: await voidEntry(String(message.id || '')) };
     case 'hb:delete':
@@ -726,7 +770,8 @@ async function handleMessage(message) {
     case 'hb:session': {
       const response = await siteRequest(P.sessionUrl(), 'GET');
       const user = response.status === 200 ? response.response?.user : null;
-      return { ok: true, loggedIn: Boolean(user), username: user?.username || '' };
+      // linuxdo_id 用来判断「这是你发出的红包」与自己是否中奖，详情卡片需要它。
+      return { ok: true, loggedIn: Boolean(user), username: user?.username || '', linuxdo_id: user?.linuxdo_id ?? null };
     }
     default:
       return { ok: false, error: '未知消息：' + String(message?.type) };

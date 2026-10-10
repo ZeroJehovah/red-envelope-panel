@@ -30,6 +30,25 @@
       };
       // 后台真实行为是「写 storage → storage.onChanged → 所有面板重渲染」，替身照做一遍。
       const notify = () => listeners.forEach((listener) => listener({ 'hb-state-v1': { newValue: state } }, 'local'));
+      // 详情卡片要的原始红包：替身按 id 回放，字段与站点返回的形状一致。
+      const packetDetails = {
+        hp1: {
+          id: 'hp1', type: 'random', status: 'active', code: '11775521', wish: '恭喜发财，大吉大利',
+          creator: { username: 'alice', linuxdo_id: 1 }, count: 5, claimed_count: 2, claimed_amount: 1.23,
+          claims: [{ share_id: 7, username: 'carol', amount: 1.23, at: 2 }],
+        },
+        hp2: {
+          id: 'hp2', type: 'lottery', status: 'active', distribution_type: 'random', code: '11775521',
+          wish: '拼手气抽奖', creator: { username: 'alice', linuxdo_id: 1 }, total_amount: 20, count: 3,
+          draw_at: Date.now() + 60000, server_now: Date.now(),
+          participants: [{ username: 'bob', name: 'bob', linuxdo_id: 9 }], winners: [],
+        },
+        hp3: {
+          id: 'hp3', type: 'random', status: 'exhausted', code: '11775521', wish: '恭喜发财，大吉大利',
+          creator: { username: 'alice', linuxdo_id: 1 }, count: 5, claimed_count: 2, claimed_amount: 1.23,
+          mine: 1.23, claims: [{ share_id: 7, username: 'carol', amount: 1.23, at: 2 }],
+        },
+      };
       globalThis.chrome = {
         runtime: {
           getManifest: () => ({ version: 'harness' }),
@@ -59,8 +78,17 @@
               notify();
               return { ok: true, added: (message.codes || []).length, state };
             }
-            if (message.type === 'hb:claim') return { ok: true, state };
-            if (message.type === 'hb:session') return { ok: true, loggedIn: true, username: 'harness' };
+            if (message.type === 'hb:claim') {
+              const row = state.entries.find((item) => item.id === message.id);
+              return {
+                ok: true,
+                state,
+                outcome: { lines: [{ text: '领取成功: +1.23 LDC', tone: 'success' }], amount: 1.23 },
+                packet: packetDetails[row && row.packetId] || null,
+              };
+            }
+            if (message.type === 'hb:packet') return { ok: true, packet: packetDetails[message.id] || null };
+            if (message.type === 'hb:session') return { ok: true, loggedIn: true, username: 'harness', linuxdo_id: 9 };
             if (['hb:void', 'hb:delete', 'hb:void-all', 'hb:clear', 'hb:resume'].includes(message.type)) {
               return { ok: true, state };
             }
@@ -75,6 +103,8 @@
     </script>
     <script src="browser-shim.js"></script>
     <script src="code-rules.js"></script>
+    <script src="hb-protocol.js"></script>
+    <script src="envelope.js"></script>
     <script src="panel.js"></script>
     <script>
       (async () => {
@@ -153,7 +183,11 @@
           check('排队中的行给出作废按钮',
             document.querySelectorAll('#hb-list .hb-row button[data-action="void"]').length === 2);
 
-          // 补一条等待点击的条目：面板要给出开启按钮，但合成点击不算真实点击。
+          // 普通红包：先用历史快照出卡片，再补上只读详情；写入只能由卡片上的真实点击触发。
+          const host = () => document.getElementById('hb-envelope-host');
+          const card = () => host() && host().shadowRoot && host().shadowRoot.querySelector('.redpacket-envelope');
+          const inCard = (selector) => (card() ? card().querySelector(selector) : null);
+
           state.entries.push({
             id: 'awaiting-1',
             code: '11775521',
@@ -162,21 +196,63 @@
             status: 'awaiting',
             result: '等待手动开启',
             lines: [{ text: '等待手动开启', tone: 'muted' }],
-            packet: { id: '77' },
-            packetId: '77',
+            packet: { id: 'hp1', type: 'random', status: 'active', code: '11775521', creator: { username: 'alice', linuxdo_id: 1 } },
+            packetId: 'hp1',
             matched: true,
             createdAt: 2,
           });
           notify();
           await tick();
           await tick();
-          const open = document.querySelector('#hb-list .hb-row[data-id="awaiting-1"] button[data-action="claim"]');
-          check('待开启条目出现开红包按钮', Boolean(open));
+          const open = document.querySelector('#hb-list .hb-row[data-id="awaiting-1"] button[data-action="open"]');
+          check('待开启条目出现开红包按钮', Boolean(open) && open.textContent === '开红包', open && open.textContent);
           if (open) click(open);
+          await tick();
+          await tick();
+          check('点开红包弹出信封卡片', Boolean(card()));
+          check('卡片显示发件人与红包口令',
+            inCard('#env-sender-name') && inCard('#env-sender-name').textContent === '来自 alice 的红包'
+            && inCard('#env-footer-code') && inCard('#env-footer-code').textContent === '11775521',
+            inCard('#env-footer-code') && inCard('#env-footer-code').textContent);
+          check('头像用随包的兜底 SVG',
+            String((inCard('#env-creator-avatar') || {}).src || '').startsWith('data:image/svg+xml'));
+          check('卡片给出开启按钮', Boolean(inCard('#btn-open-packet')));
+          if (inCard('#btn-open-packet')) click(inCard('#btn-open-packet'));
           await tick();
           check('合成点击不授权领取（isTrusted 校验）',
             !sent.some((message) => message.type === 'hb:claim'),
             JSON.stringify(sent.filter((message) => message.type === 'hb:claim')));
+
+          // 已完结的条目：卡片是只读的，直接摊开结果、进度与领取记录。
+          state.entries.push({
+            id: 'done-1',
+            code: '11775521',
+            charset: 'numeric',
+            claimMode: 'manual',
+            status: 'done',
+            result: '领取成功: +1.23 LDC',
+            lines: [{ text: '领取成功: +1.23 LDC', tone: 'success' }],
+            packet: { id: 'hp3', type: 'random', status: 'exhausted', code: '11775521', mine: 1.23, creator: { username: 'alice', linuxdo_id: 1 } },
+            packetId: 'hp3',
+            matched: true,
+            createdAt: 3,
+          });
+          notify();
+          await tick();
+          const view = document.querySelector('#hb-list .hb-row[data-id="done-1"] button[data-action="open"]');
+          check('已完结条目给出查看按钮', Boolean(view) && view.textContent === '查看', view && view.textContent);
+          if (view) click(view);
+          await tick();
+          await tick();
+          check('历史卡片直接展开结果视图',
+            Boolean(inCard('#envelope-opened-view')) && inCard('#envelope-opened-view').style.display === 'flex');
+          check('历史卡片显示领取金额',
+            String((inCard('#env-claimed-amount') || {}).textContent || '').startsWith('1.23'),
+            inCard('#env-claimed-amount') && inCard('#env-claimed-amount').textContent);
+          check('历史卡片渲染领取记录',
+            Boolean(inCard('#env-claims-list')) && inCard('#env-claims-list').querySelectorAll('.envelope-claim-row').length === 1);
+          check('历史卡片收起封口视图',
+            Boolean(inCard('#envelope-closed-view')) && inCard('#envelope-closed-view').style.display === 'none');
 
           // 抽奖红包：没报名时给「参与抽选」，报名之后只剩等待开奖。
           const lotteryRow = {
@@ -187,27 +263,45 @@
             status: 'awaiting',
             result: '等待手动参与抽选',
             lines: [{ text: '等待手动参与抽选', tone: 'muted' }],
-            packet: { id: '88', type: 'lottery', joined: false },
-            packetId: '88',
+            packet: { id: 'hp2', type: 'lottery', joined: false, code: '11775521', creator: { username: 'alice', linuxdo_id: 1 } },
+            packetId: 'hp2',
             matched: true,
-            createdAt: 3,
+            createdAt: 4,
           };
           state.entries.push(lotteryRow);
           notify();
           await tick();
-          const lotteryButton = document.querySelector('#hb-list .hb-row[data-id="lottery-1"] button[data-action="claim"]');
+          const lotteryButton = document.querySelector('#hb-list .hb-row[data-id="lottery-1"] button[data-action="open"]');
           check('抽奖待参与条目的按钮是「参与抽选」',
             Boolean(lotteryButton) && lotteryButton.textContent === '参与抽选',
             lotteryButton && lotteryButton.textContent);
+          if (lotteryButton) click(lotteryButton);
+          await tick();
+          await tick();
+          check('抽奖卡片显示倒计时',
+            /秒$/.test(String((inCard('#lottery-countdown') || {}).textContent || '')),
+            inCard('#lottery-countdown') && inCard('#lottery-countdown').textContent);
+          check('抽奖卡片列出参与者',
+            Boolean(inCard('#lottery-participants')) && inCard('#lottery-participants').textContent.includes('bob'));
+          check('未报名时给出参与按钮',
+            Boolean(inCard('#lottery-join')) && inCard('#lottery-join').hidden === false);
 
-          lotteryRow.packet = { id: '88', type: 'lottery', joined: true };
+          lotteryRow.packet = { id: 'hp2', type: 'lottery', joined: true, code: '11775521', creator: { username: 'alice', linuxdo_id: 1 } };
+          packetDetails.hp2 = Object.assign({}, packetDetails.hp2, { joined: true });
           notify();
           await tick();
           const lotteryChip = document.querySelector('#hb-list .hb-row[data-id="lottery-1"] .hb-status');
           check('已报名的抽奖显示等待开奖', Boolean(lotteryChip) && lotteryChip.textContent === '等待开奖',
             lotteryChip && lotteryChip.textContent);
-          check('报名之后不再给写入动作',
-            !document.querySelector('#hb-list .hb-row[data-id="lottery-1"] button[data-action="claim"]'));
+          const reopen = document.querySelector('#hb-list .hb-row[data-id="lottery-1"] button[data-action="open"]');
+          if (reopen) click(reopen);
+          await tick();
+          await tick();
+          check('已报名的抽奖卡片不再给参与按钮',
+            Boolean(inCard('#lottery-join')) && inCard('#lottery-join').hidden === true);
+          check('报名之后行上不再给写入动作',
+            document.querySelectorAll('#hb-list button[data-action="claim"]').length === 0);
+
 
           click(document.querySelector('[data-switch="batch"]'));
           await tick();

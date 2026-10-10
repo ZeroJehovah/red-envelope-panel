@@ -34,9 +34,14 @@
 
   // 口令规则来自 code-rules.js，与脚本版逐字符一致。
   const codes = globalThis.HBCodes;
+  // 红包详情卡片（envelope.js + envelope.css）：挂在面板自己的影子 DOM 里，一次一张。
+  const envelope = globalThis.HBEnvelope;
   // 面板只镜像最近一次渲染的 settings 用于输入过滤，权威状态始终在后台；写入一律走消息接口。
   let settings = { charset: 'text', batch: false, claimMode: 'manual', gapExtraMs: 0 };
   const fieldStates = new WeakMap();
+  // 最近一次渲染的完整状态，供「打开卡片」按 id 找条目；以及当前卡片对应的条目 id。
+  let lastState = null;
+  let openEnvelopeId = null;
 
   const TEMPLATE = `
     <header class="hb-header">
@@ -353,16 +358,22 @@
     return STATUS_LABEL[entry.status] || '未知';
   }
 
-  // 一条历史能给的动作：等待点击的开启/参与抽选、排队中的作废、已完结的删除；
-  // 执行中不给动作，抽奖报名后也不再给动作。
-  function actionFor(entry) {
-    if (entry.status === 'awaiting' && entry.packet?.joined) return { action: 'delete', label: '删除' };
-    if (entry.status === 'awaiting' && entry.claimMode === 'manual') {
-      return { action: 'claim', label: entry.packet?.type === 'lottery' ? '参与抽选' : '开红包', primary: true };
+  // 一条历史能给的动作：有红包快照的可以打开详情卡片（只有「待开启」的卡片里带
+  // 开启/参与按钮，历史卡片是只读的），排队中的可以作废，完结的可以删除。
+  function actionsFor(entry) {
+    const actions = [];
+    const packet = entry.packet;
+    if (packet?.id) {
+      const claimable = entry.status === 'awaiting' && entry.claimMode === 'manual';
+      const label = claimable ? (packet.type === 'lottery' ? '参与抽选' : '开红包') : '查看';
+      actions.push({ action: 'open', label, primary: claimable });
     }
-    if (entry.status === 'queued') return { action: 'void', label: '作废' };
-    if (entry.status === 'running') return null;
-    return { action: 'delete', label: '删除' };
+    if (entry.status === 'queued') {
+      actions.push({ action: 'void', label: '作废' });
+      return actions;
+    }
+    if (entry.status !== 'running') actions.push({ action: 'delete', label: '删除' });
+    return actions;
   }
 
   function renderQueue(state) {
@@ -420,8 +431,7 @@
       time.className = 'hb-row-time';
       time.textContent = stampText(entry.createdAt);
       foot.append(time);
-      const action = actionFor(entry);
-      if (action) {
+      for (const action of actionsFor(entry)) {
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'hb-row-button' + (action.primary ? ' hb-row-button--primary' : '');
@@ -444,9 +454,16 @@
   }
 
   function render(state) {
+    lastState = state;
     renderInput(state);
     renderQueue(state);
     renderMeta(state);
+    // 条目在别处被删除或清空时，把它的详情卡片一起收起来。
+    const entries = Array.isArray(state.entries) ? state.entries : [];
+    if (openEnvelopeId && !entries.some((entry) => entry.id === openEnvelopeId)) {
+      openEnvelopeId = null;
+      envelope?.close();
+    }
   }
 
   // chrome.sidePanel.open 必须在用户手势内发起，而 await 会打断手势，
@@ -477,11 +494,78 @@
     });
   }
 
+  // 只读红包详情：memory 优先，network 为真（或后台没缓存）时让后台补一次 GET。
+  let hintNode = null;
+
+  // 所有动作都经这里转给后台：成功与否都写进面板底部的提示行。
+  function send(message, okText) {
+    return api.runtime.sendMessage(message).then((response) => {
+      if (hintNode) hintNode.textContent = response?.ok ? (okText || '') : (response?.error || '操作未完成');
+      return response;
+    }, (error) => {
+      if (hintNode) hintNode.textContent = '后台暂不可用：' + String(error?.message || error);
+      return undefined;
+    });
+  }
+
+  async function readPacket(packetId, network) {
+    try {
+      const response = await api.runtime.sendMessage({ type: 'hb:packet', id: packetId, refresh: network === true });
+      return response?.ok ? response.packet : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // 打开红包详情卡片：先用历史里那份快照立即出卡片，再把手上的只读请求结果补进去。
+  // 卡片上的「开」/「参与抽选」是唯一的写入入口，由 envelope.js 校验真实点击。
+  async function openEnvelope(id, hint) {
+    const entry = (lastState?.entries || []).find((item) => item.id === id);
+    if (!entry?.packet?.id) {
+      hint.textContent = '这条记录没有红包详情可看。';
+      return;
+    }
+    if (!envelope) {
+      hint.textContent = '红包卡片未加载，请重新打开面板。';
+      return;
+    }
+    const packetId = entry.packet.id;
+    const claimable = entry.status === 'awaiting' && entry.claimMode === 'manual';
+    const handle = envelope.show({
+      entry,
+      packet: entry.packet,
+      viewOnly: !claimable,
+      onWrite: () => send({ type: 'hb:claim', id, trusted: true }, '领取请求已发出，结果以红包站为准。'),
+      onRefresh: (network) => readPacket(packetId, network),
+      // 打开新卡片会先关掉上一张，所以关卡片只清掉属于它的那次记录。
+      onClose: () => { if (openEnvelopeId === id) openEnvelopeId = null; },
+    });
+    if (!handle) {
+      openEnvelopeId = null;
+      hint.textContent = '红包卡片打开失败，请重试。';
+      return;
+    }
+    openEnvelopeId = id;
+    hint.textContent = '正在读取红包详情…';
+    const [fresh, session] = await Promise.all([
+      readPacket(packetId, true),
+      api.runtime.sendMessage({ type: 'hb:session' }).catch(() => null),
+    ]);
+    // 读取期间卡片可能已被关掉或换成别的条目，这时不要再往卡片里写东西。
+    if (openEnvelopeId !== id) return;
+    const user = session?.ok && session.loggedIn
+      ? { username: session.username, linuxdo_id: session.linuxdo_id ?? null }
+      : null;
+    handle.update({ packet: fresh || undefined, user });
+    hint.textContent = fresh ? '' : '暂时读不到最新详情，显示的是本地记录。';
+  }
+
   function mount(root, options = {}) {
     root.innerHTML = TEMPLATE;
     text('#hb-version', 'v' + VERSION);
 
     const hint = document.getElementById('hb-hint');
+    hintNode = hint;
     const sidebarButton = document.getElementById('hb-open-sidebar');
     if (options.allowSidePanelOpen) {
       sidebarButton.hidden = false;
@@ -497,14 +581,6 @@
     siteButton.textContent = '打开 ' + SITE_LABEL;
     siteButton.addEventListener('click', () => {
       api.tabs.create({ url: SITE_URL });
-    });
-
-    const send = (message, okText) => api.runtime.sendMessage(message).then((response) => {
-      hint.textContent = response?.ok ? (okText || '') : (response?.error || '操作未完成');
-      return response;
-    }, (error) => {
-      hint.textContent = '后台暂不可用：' + String(error?.message || error);
-      return undefined;
     });
 
     // 队列动作都交给后台：面板只发消息，状态经 storage 变更回流后重绘。
@@ -537,13 +613,14 @@
       const id = button.closest('.hb-row')?.dataset.id;
       if (!id) return;
       const action = button.dataset.action;
-      // 领取是写操作：只认真实点击（后台还会校验条目状态），一次点击只放行一条请求。
-      if (action === 'claim' && !event.isTrusted) return;
-      const message = action === 'claim'
-        ? { type: 'hb:claim', id, trusted: true }
-        : (action === 'void' ? { type: 'hb:void', id } : { type: 'hb:delete', id });
       button.disabled = true;
-      send(message, action === 'claim' ? '领取请求已发出，结果以红包站为准。' : '').then((response) => {
+      // 打开详情卡片只是只读操作；真正的领取/参与在卡片里由真实点击触发。
+      if (action === 'open') {
+        openEnvelope(id, hint).finally(() => { button.disabled = false; });
+        return;
+      }
+      const message = action === 'void' ? { type: 'hb:void', id } : { type: 'hb:delete', id };
+      send(message, '').then((response) => {
         if (!response?.ok) button.disabled = false;
       });
     });

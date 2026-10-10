@@ -344,6 +344,8 @@
     validPacket,
     hasMatchedPacket,
     isPacketCreator,
+    lotteryWinner,
+    lotteryPayoutText,
     packetSnapshot,
     matchLines,
     packetStatusText,
