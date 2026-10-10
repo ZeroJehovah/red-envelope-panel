@@ -416,13 +416,8 @@
     const list = document.getElementById('hb-list');
     const scrollTop = list.scrollTop;
     list.replaceChildren();
-    if (!entries.length) {
-      const empty = document.createElement('p');
-      empty.className = 'hb-empty';
-      empty.textContent = '队列为空，输入口令后点「拆红包」。';
-      list.append(empty);
-      return;
-    }
+    // 没有记录就空着（脚本版也是这样），不写占位文案。
+    if (!entries.length) return;
 
     const fragment = document.createDocumentFragment();
     // 新条目在上。

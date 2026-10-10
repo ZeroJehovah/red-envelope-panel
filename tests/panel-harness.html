@@ -170,6 +170,14 @@
           check('面板没有 #hb-hint 元素', document.getElementById('hb-hint') === null);
           check('面板没有 .hb-hint 提示行', document.querySelector('.hb-hint') === null);
 
+          // 没有记录就空着（脚本版也一样），不写占位文案；面板只占内容那么高，
+          // 空出来的高度让给口令历史，而不是在下面留一块空底。
+          const listBox = document.getElementById('hb-list');
+          check('空历史不渲染占位文案', listBox.children.length === 0, String(listBox.children.length));
+          const panelHeight = Math.round(document.getElementById('app').getBoundingClientRect().height);
+          check('空历史时面板只有内容高度', panelHeight < 300,
+            panelHeight + 'px @ ' + window.innerWidth + '×' + window.innerHeight);
+
           // 输入区与草稿。
           check('面板渲染出输入框', Boolean(input()) && input().hidden === false);
           check('批量输入框初始隐藏', textarea().hidden === true);
@@ -361,6 +369,9 @@
           check('卡片保持原尺寸（原站 320×520 乘 1.2 倍）',
             Math.abs(cardW - wantW) <= 1 && Math.abs(cardH - wantH) <= 1,
             cardW + '×' + cardH + '，期望 ' + wantW + '×' + wantH + ' @ ' + window.innerWidth + '×' + window.innerHeight);
+          // 卡片开着时面板才给卡片让位（弹出面板据此把窗口撑到浏览器上限），
+          // 平时按内容量高低，下面不留空底。
+          check('卡片打开时面板给卡片让位', document.body.classList.contains('hb-card-open'));
           // 回归：宿主是固定定位、盖住整个面板的元素，关掉卡片后必须彻底让路，
           // 否则面板会被一层透明宿主吞掉点击（表现为「关掉红包后面板点不动」）。
           globalThis.HBEnvelope.close();
@@ -370,6 +381,7 @@
             Boolean(probe) && document.getElementById('app').contains(probe),
             probe ? (probe.id || probe.className || probe.tagName) : 'null');
           check('关掉卡片后宿主不留在 DOM 里', document.getElementById('hb-envelope-host') === null);
+          check('关掉卡片后收回让位标记', document.body.classList.contains('hb-card-open') === false);
           check('已完结行只给删除动作',
             Boolean(row('done-1').querySelector('button[data-action="delete"]'))
             && !row('done-1').querySelector('button[data-action="void"]'));

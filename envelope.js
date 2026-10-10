@@ -20,6 +20,9 @@
 (function () {
   const P = globalThis.HBProtocol;
   const HOST_ID = 'hb-envelope-host';
+  // 卡片开着时给 body 打个标：弹出面板据此把窗口撑到浏览器上限，卡片才能按原尺寸铺开；
+  // 卡片一关就撤掉，面板收回内容高度（侧边栏外壳不看这个类）。
+  const CARD_OPEN_CLASS = 'hb-card-open';
   const POLL_INTERVAL_MS = 4000;   // 卡片开着时的刷新节奏；后台限速会让它不会更密
 
   // 这里只放卡片「里面」的两块视图：卡片本体由 createNode 建出来，class 已经在了，
@@ -207,6 +210,7 @@
     if (host) host.remove();
     host = null;
     overlay = null;
+    document.body.classList.remove(CARD_OPEN_CLASS);
     if (typeof current.onClose === 'function') {
       try {
         current.onClose();
@@ -590,6 +594,7 @@
     };
     overlay.append(node);
     overlay.classList.add('active');
+    document.body.classList.add(CARD_OPEN_CLASS);
     card = state;
 
     node.addEventListener('click', (event) => {

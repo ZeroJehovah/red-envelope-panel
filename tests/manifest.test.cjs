@@ -148,8 +148,17 @@ test('红包卡片保持原尺寸，弹出面板按卡片留位', () => {
   assert.ok(popup, '面板样式里缺少弹出面板外壳规则');
   const width = /width: (\d+)px/.exec(popup[0]);
   assert.ok(width && Number(width[1]) >= 544, '弹出面板宽度放不下原尺寸的卡片：' + (width && width[1]));
-  const height = /min-height: (\d+)px/.exec(popup[0]);
-  assert.ok(height && Number(height[1]) >= 600, '弹出面板高度放不下原尺寸的卡片：' + (height && height[1]));
+  // 平时不留固定高度：下面那块空白交给口令历史，内容多高面板就多高。
+  assert.equal(/min-height: \d+px/.test(popup[0]), false, '弹出面板又按固定高度留出一块空底');
+  // 卡片打开时才把窗口撑到浏览器上限（600px），卡片按原尺寸铺开。
+  const openCard = /body\.hb-popup\.hb-card-open \{[^}]*\}/.exec(panel);
+  assert.ok(openCard, '缺少卡片打开时撑高弹出面板的规则');
+  const height = /min-height: (\d+)px/.exec(openCard[0]);
+  assert.ok(height && Number(height[1]) >= 600, '卡片打开时面板高度放不下原尺寸的卡片：' + (height && height[1]));
+  // 撑高标记由卡片自己打上、关掉时收回。
+  const envelope = readFileSync(join(root, 'envelope.js'), 'utf8');
+  assert.match(envelope, /document\.body\.classList\.add\(CARD_OPEN_CLASS\)/, '打开卡片时没有给弹出面板打招呼撑高');
+  assert.match(envelope, /document\.body\.classList\.remove\(CARD_OPEN_CLASS\)/, '关掉卡片时没有收回撑高标记');
 });
 
 test('面板里没有脚本版侧边栏之外的常驻提示区', () => {
@@ -161,6 +170,10 @@ test('面板里没有脚本版侧边栏之外的常驻提示区', () => {
   assert.equal(css.includes('hb-hint'), false, 'panel.css 里又出现了提示行样式');
   assert.equal(panel.includes('面板在任意网站都可用'), false, '又加回了常驻的提示文案');
   assert.equal(panel.includes('面板固定在浏览器侧边栏'), false, '又加回了常驻的提示文案');
+  // 空历史也照脚本版空着，不写占位文案。
+  assert.equal(panel.includes('队列为空'), false, '又加回了空历史的占位文案');
+  assert.equal(panel.includes('hb-empty'), false, 'panel.js 里又出现了空历史占位元素');
+  assert.equal(css.includes('hb-empty'), false, 'panel.css 里又出现了空历史占位样式');
   // 没有行级出口的问题只记控制台；登录检查写在配置面板那一行。
   assert.match(panel, /console\.warn\('\[红包口令面板\] '/, '缺少控制台告警出口');
   assert.match(panel, /text\('#hb-session-text'/, '登录检查结果没有写进配置面板');
