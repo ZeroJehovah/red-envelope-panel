@@ -541,14 +541,3 @@ body.hb-popup .hb-list {
   font-size: 12px;
 }
 
-.hb-hint {
-  margin: 0;
-  padding: 0 10px 8px;
-  color: var(--hb-text-tertiary);
-  font-size: 11px;
-}
-
-.hb-hint:empty {
-  display: none;
-}
-

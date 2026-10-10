@@ -127,7 +127,6 @@
         <div class="hb-list" id="hb-list" tabindex="0"></div>
       </div>
     </form>
-    <p class="hb-hint" id="hb-hint"></p>
   `;
 
   // 面板只镜像最近一次渲染的 settings 用于输入过滤与开关外观，权威状态始终在后台。
@@ -138,7 +137,14 @@
   let lastState = null;
   let openEnvelopeId = null;
   let configOpen = false;
-  let hintNode = null;
+
+  // 面板里没有全局提示区（脚本版侧边栏也没有）：领取/参与/查询的结果都写在历史行里，
+  // 队列出错走「执行已暂停」横幅，登录检查的结果写在配置面板的「红包站：」一行。
+  // 剩下那些没有行级出口的问题（后台不可用、写请求被拒、读不到详情）只落到控制台，
+  // 免得在面板里凭空多出一块占地方的提示区。
+  function warn(message, error) {
+    console.warn('[红包口令面板] ' + message, error ?? '');
+  }
 
   function text(selector, value) {
     const node = document.querySelector(selector);
@@ -494,45 +500,42 @@
 
   /* --------------------------------- 写入 ---------------------------------- */
 
-  // 所有动作都经这里转给后台：成功与否都写进面板底部的提示行。
-  function send(message, okText) {
+  // 所有动作都经这里转给后台。结果不在这里提示：写操作的结果由后勤写回历史行，
+  // 真正失败（消息发不出去或被后台拒绝）只记一笔控制台。
+  function send(message) {
     return api.runtime.sendMessage(message).then((response) => {
-      if (hintNode) hintNode.textContent = response?.ok ? (okText || '') : (response?.error || '操作未完成');
+      if (!response?.ok) warn(message.type + ' 被后台拒绝：' + (response?.error || '未知错误'));
       return response;
     }, (error) => {
-      if (hintNode) hintNode.textContent = '后台暂不可用：' + String(error?.message || error);
+      warn(message.type + ' 发不出去：后台暂不可用', error);
       return undefined;
     });
   }
 
   // 保存设置：先本地镜像并立即刷新开关外观，再写后台；
   // 后台状态回来后还会经 storage.onChanged 重渲染一次，因此这里不等回环。
-  async function patchSettings(patch, hint) {
+  async function patchSettings(patch) {
     settings = { ...settings, ...patch };
     renderHeader(lastState || { settings });
     renderConfig(lastState || { settings });
-    const response = await send({ type: 'hb:state:patch', patch: { settings: patch } }, '');
-    if (response && !response.ok && hint) hint.textContent = '保存设置失败：' + (response.error || '未知错误');
+    await send({ type: 'hb:state:patch', patch: { settings: patch } });
   }
 
   async function submitDraft() {
     const field = activeField();
     const list = field ? codes.parseCodes(field.value, settings.charset, settings.batch === true) : [];
-    if (!list.length) {
-      hintNode.textContent = '请先输入口令。';
-      return;
-    }
+    // 空草稿与非法的口令在按钮上就拦住了（禁用 + title 说明），这里只是兜底。
+    if (!list.length) return;
     const invalid = list.map((item) => codes.validateCode(item.code, item.charset)).find(Boolean);
     if (invalid) {
-      hintNode.textContent = invalid;
+      warn('口令未通过校验，未提交：' + invalid);
       return;
     }
-    const response = await send({ type: 'hb:submit', codes: list, claimMode: settings.claimMode }, '');
+    const response = await send({ type: 'hb:submit', codes: list, claimMode: settings.claimMode });
     if (!response?.ok) return;
-    // 入队成功后清空草稿，队列状态由 storage 变更推回面板。
+    // 入队成功后清空草稿；新口令会立刻以「排队中」出现在历史列表里，不再另写提示。
     if (field) field.value = '';
     syncDraft();
-    hintNode.textContent = '已加入队列 ' + response.added + ' 条口令。';
   }
 
   /* ------------------------------ 红包详情卡片 ------------------------------ */
@@ -551,11 +554,11 @@
   async function openEnvelope(id) {
     const entry = (lastState?.entries || []).find((item) => item.id === id);
     if (!entry?.packet?.id) {
-      hintNode.textContent = '这条记录没有红包详情可看。';
+      warn('这条记录没有红包详情可看：' + id);
       return;
     }
     if (!envelope) {
-      hintNode.textContent = '红包卡片未加载，请重新打开面板。';
+      warn('红包卡片脚本未加载，请重新打开面板。');
       return;
     }
     const packetId = entry.packet.id;
@@ -564,18 +567,17 @@
       entry,
       packet: entry.packet,
       viewOnly: !claimable,
-      onWrite: () => send({ type: 'hb:claim', id, trusted: true }, '领取请求已发出，结果以红包站为准。'),
+      onWrite: () => send({ type: 'hb:claim', id, trusted: true }),
       onRefresh: (network) => readPacket(packetId, network),
       // 打开新卡片会先关掉上一张，所以关卡片只清掉属于它的那次记录。
       onClose: () => { if (openEnvelopeId === id) openEnvelopeId = null; },
     });
     if (!handle) {
       openEnvelopeId = null;
-      hintNode.textContent = '红包卡片打开失败，请重试。';
+      warn('红包卡片打开失败：' + id);
       return;
     }
     openEnvelopeId = id;
-    hintNode.textContent = '正在读取红包详情…';
     const [fresh, session] = await Promise.all([
       readPacket(packetId, true),
       api.runtime.sendMessage({ type: 'hb:session' }).catch(() => null),
@@ -586,7 +588,8 @@
       ? { username: session.username, linuxdo_id: session.linuxdo_id ?? null }
       : null;
     handle.update({ packet: fresh || undefined, user });
-    hintNode.textContent = fresh ? '' : '暂时读不到最新详情，显示的是本地记录。';
+    // 读不到最新详情时卡片显示的是历史里的快照，这与脚本版一致，不再另写提示。
+    if (!fresh) warn('暂时读不到红包 ' + packetId + ' 的最新详情，显示本地记录。');
   }
 
   /* -------------------------------- 侧边栏 --------------------------------- */
@@ -605,17 +608,17 @@
 
   function openSidebar() {
     if (!api.sidePanel?.open) {
-      hintNode.textContent = '当前浏览器不支持扩展侧边栏，请使用 Chrome 116 及以上版本。';
+      warn('当前浏览器不支持扩展侧边栏，请使用 Chrome 116 及以上版本。');
       return;
     }
     if (currentWindowId === null) {
-      hintNode.textContent = '尚未确认当前窗口，请在弹出面板中重试。';
+      warn('尚未确认当前窗口，无法打开侧边栏。');
       return;
     }
     api.sidePanel.open({ windowId: currentWindowId }).then(() => {
       window.close();
     }, (error) => {
-      hintNode.textContent = '打开侧边栏失败：' + String(error?.message || error);
+      warn('打开侧边栏失败', error);
     });
   }
 
@@ -627,8 +630,6 @@
     const isPopup = shell === 'popup';
 
     root.innerHTML = TEMPLATE;
-    const hint = document.getElementById('hb-hint');
-    hintNode = hint;
 
     document.getElementById('hb-open-site').addEventListener('click', () => {
       api.tabs.create({ url: SITE_URL });
@@ -648,59 +649,61 @@
     document.querySelector('[data-switch="batch"]').addEventListener('click', () => {
       const next = settings.batch !== true;
       moveDraftToMode(next);
-      patchSettings({ batch: next }, hint);
+      patchSettings({ batch: next });
       activeField()?.focus();
     });
     document.querySelector('[data-switch="charset"]').addEventListener('click', () => {
       const next = settings.charset === 'numeric' ? 'text' : 'numeric';
       applyCharsetToDraft(next);
-      patchSettings({ charset: next }, hint);
+      patchSettings({ charset: next });
       activeField()?.focus();
     });
     document.querySelector('[data-switch="claimMode"]').addEventListener('click', () => {
       const next = settings.claimMode === 'direct' ? 'manual' : 'direct';
-      patchSettings({ claimMode: next }, hint);
-      hint.textContent = next === 'direct'
-        ? '新的口令会由后台直接领取。'
-        : '新的口令会停在「待开启」，由你在面板上点击开启。';
+      // 领取方式存进设置，新的口令按它走；脚本版也只是切换开关，不另写说明。
+      patchSettings({ claimMode: next });
     });
     document.querySelector('[data-switch="display"]').addEventListener('click', () => {
       const next = displayMode(settings) === 'dock' ? 'float' : 'dock';
-      patchSettings({ display: next === 'dock' ? 'sidebar' : 'panel' }, hint);
+      patchSettings({ display: next === 'dock' ? 'sidebar' : 'panel' });
       if (next === 'dock') {
         if (isPopup) {
+          // 切到停靠就直接把侧边栏拉起来；面板关掉，肉眼可见，不用再写一行说明。
           openSidebar();
-          return;
         }
-        hint.textContent = '面板已固定在浏览器侧边栏。';
-        return;
       }
-      hint.textContent = isPopup ? '当前是悬浮形态：点扩展图标弹出面板。' : '已切回悬浮：点扩展图标即可弹出面板。';
     });
 
     const gapInput = document.getElementById('hb-gap');
     // 输入时即时生效，失焦或回车后再把夹紧后的值写回控件。
     gapInput.addEventListener('input', () => {
-      patchSettings({ gapExtraMs: P.clampGapExtra(gapInput.value) }, hint);
+      patchSettings({ gapExtraMs: P.clampGapExtra(gapInput.value) });
     });
     gapInput.addEventListener('change', () => {
-      patchSettings({ gapExtraMs: P.clampGapExtra(gapInput.value) }, hint);
+      patchSettings({ gapExtraMs: P.clampGapExtra(gapInput.value) });
       gapInput.value = String(P.clampGapExtra(gapInput.value));
     });
 
     document.getElementById('hb-session').addEventListener('click', async () => {
-      hint.textContent = '正在确认红包站登录状态…';
-      const response = await send({ type: 'hb:session' }, '');
-      if (!response?.ok) return;
-      text('#hb-session-text', response.loggedIn ? '已登录：' + response.username : '未登录');
-      hint.textContent = response.loggedIn
-        ? '已登录红包站：' + response.username
-        : '未检测到红包站登录状态，请打开 ' + SITE_LABEL + ' 登录后再试。';
+      // 登录状态就写在配置面板「红包站：」那一行里，不再占用面板底部。
+      text('#hb-session-text', '正在确认…');
+      const response = await send({ type: 'hb:session' });
+      if (!response) {
+        text('#hb-session-text', '检查失败');
+        return;
+      }
+      if (!response.ok) {
+        text('#hb-session-text', '检查失败：' + (response.error || '未知错误'));
+        return;
+      }
+      text('#hb-session-text', response.loggedIn
+        ? '已登录：' + response.username
+        : '未登录，请到 ' + SITE_LABEL + ' 登录');
     });
 
-    document.getElementById('hb-resume').addEventListener('click', () => send({ type: 'hb:resume' }, ''));
-    document.getElementById('hb-void-all').addEventListener('click', () => send({ type: 'hb:void-all' }, ''));
-    document.getElementById('hb-clear').addEventListener('click', () => send({ type: 'hb:clear' }, ''));
+    document.getElementById('hb-resume').addEventListener('click', () => send({ type: 'hb:resume' }));
+    document.getElementById('hb-void-all').addEventListener('click', () => send({ type: 'hb:void-all' }));
+    document.getElementById('hb-clear').addEventListener('click', () => send({ type: 'hb:clear' }));
 
     // 历史行的动作走事件委托：行元素每次渲染都会重建。
     document.getElementById('hb-list').addEventListener('click', (event) => {
@@ -721,7 +724,7 @@
         return;
       }
       const message = action === 'void' ? { type: 'hb:void', id } : { type: 'hb:delete', id };
-      send(message, '').then((response) => {
+      send(message).then((response) => {
         if (!response?.ok) button.disabled = false;
       });
     });
@@ -742,10 +745,10 @@
       try {
         const response = await api.runtime.sendMessage({ type: 'hb:state:get' });
         render(response?.ok ? response.state : { entries: [], settings: {} });
-        if (!response?.ok) hint.textContent = '读取状态失败：' + (response?.error || '未知错误');
+        if (!response?.ok) warn('读取状态失败：' + (response?.error || '未知错误'));
       } catch (error) {
         render({ entries: [], settings: {} });
-        hint.textContent = '后台暂不可用：' + String(error?.message || error);
+        warn('后台暂不可用，面板显示为空状态', error);
       }
     };
 

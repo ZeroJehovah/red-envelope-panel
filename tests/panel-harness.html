@@ -134,7 +134,7 @@
         const textarea = () => document.getElementById('hb-textarea');
         const submit = () => document.getElementById('hb-submit');
         const counter = () => document.getElementById('hb-count');
-        const hint = () => document.getElementById('hb-hint');
+        const sessionText = () => document.getElementById('hb-session-text');
         const config = () => document.getElementById('hb-config');
         const gap = () => document.getElementById('hb-gap');
         const row = (id) => document.querySelector('#hb-list .hb-entry[data-id="' + id + '"]');
@@ -166,9 +166,9 @@
           await tick();
           await tick();
 
-          // 底部提示行只在有话说的时候出现：启动时是空的，且不占高度（`(:empty)` 收起）。
-          check('启动时提示行是空的', hint().textContent === '', JSON.stringify(hint().textContent));
-          check('空提示行不占高度', hint().offsetHeight === 0, String(hint().offsetHeight));
+          // 面板里不该有脚本版侧边栏没有的常驻提示区（底部那行整个删掉了）。
+          check('面板没有 #hb-hint 元素', document.getElementById('hb-hint') === null);
+          check('面板没有 .hb-hint 提示行', document.querySelector('.hb-hint') === null);
 
           // 输入区与草稿。
           check('面板渲染出输入框', Boolean(input()) && input().hidden === false);
@@ -232,6 +232,13 @@
           check('悬浮切停靠会打开侧边栏并收起面板',
             sidePanelOpens.length === 1 && closeCalls === 1
             && sent.some((message) => message.type === 'hb:state:patch' && message.patch.settings.display === 'sidebar'));
+          // 「检查登录」的结果写在配置面板那一行里（面板底部不再有提示区）。
+          check('登录状态初始为未确认', sessionText().textContent === '状态未确认', sessionText().textContent);
+          click(document.getElementById('hb-session'));
+          await tick();
+          await tick();
+          check('检查登录写进配置面板的那一行',
+            sessionText().textContent === '已登录：harness', sessionText().textContent);
 
           // 队列与历史。
           check('作废队列在没有排队口令时禁用', document.getElementById('hb-void-all').disabled === true);
@@ -244,7 +251,8 @@
           check('提交把两条口令交给后台', Boolean(request) && request.codes.length === 2,
             JSON.stringify(request && request.codes));
           check('提交成功后清空草稿', textarea().value === '', textarea().value);
-          check('提交结果写进底部提示行', /已加入队列 2 条口令/.test(hint().textContent), hint().textContent);
+          check('提交成功后按钮回到禁用', submit().disabled === true, String(submit().disabled));
+          check('空草稿的按钮带「请先输入口令」说明', submit().title === '请先输入口令', submit().title);
           check('入队口令渲染成历史行', rows().length === 2, String(rows().length));
           check('历史头显示条数与排队数',
             /口令历史（2 条 · 排队 2 条）/.test(document.getElementById('hb-history-label').textContent),
