@@ -358,6 +358,12 @@ async function runEntry(entry) {
 let timer = null;
 let executing = false;
 
+// 队列推进失败（例如 worker 正好被回收、浏览器正在关闭）不算错误：
+// 状态与限速时间戳都在 storage 里，下一次唤醒（消息或 alarm）重新读回继续跑。
+function scheduleTick() {
+  tick().catch(() => {});
+}
+
 function queuedEntries() {
   return state.entries.filter((entry) => entry.status === 'queued');
 }
@@ -410,11 +416,11 @@ async function tick() {
   if (delay > 0) {
     timer = setTimeout(() => {
       timer = null;
-      void tick();
+      scheduleTick();
     }, Math.min(delay, WAIT_SLICE_MS));
     return;
   }
-  void executeEntry(next);
+  executeEntry(next).catch(() => {});
 }
 
 // 一条口令的终局：awaiting 停在等待点击，pause 表示不该让队列继续往下跑。
@@ -450,7 +456,7 @@ async function executeEntry(entry) {
   }
   executing = false;
   await settle(entry, outcome);
-  if (!state.paused) void tick();
+  if (!state.paused) scheduleTick();
 }
 
 async function voidEntry(id) {
@@ -514,7 +520,7 @@ async function resumeQueue() {
   state.paused = false;
   state.pausedReason = '';
   await commit();
-  void tick();
+  scheduleTick();
   return state;
 }
 
@@ -533,7 +539,7 @@ async function handleClaim(message) {
   }
   const outcome = await claimPacket(entry, entry.packet);
   await settle(entry, outcome);
-  if (!state.paused) void tick();
+  if (!state.paused) scheduleTick();
   return { ok: true, state: snapshot() };
 }
 
@@ -567,7 +573,7 @@ async function handleSubmit(message) {
   if (!created.length) return { ok: false, error: '没有可提交的有效口令' };
   state.entries = state.entries.concat(created);
   await commit();
-  void tick();
+  scheduleTick();
   return { ok: true, added: created.length, state: snapshot() };
 }
 
@@ -634,13 +640,13 @@ api.runtime.onInstalled.addListener(() => {
 });
 
 api.runtime.onStartup?.addListener(() => {
-  void tick();
+  scheduleTick();
 });
 
 api.alarms?.onAlarm.addListener((alarm) => {
-  if (alarm?.name === TICK_ALARM) void tick();
+  if (alarm?.name === TICK_ALARM) scheduleTick();
 });
 
 // worker 每次被唤醒都可能是在队列中途：先载入状态，把该跑的接着跑。
-void tick();
+scheduleTick();
 
