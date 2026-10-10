@@ -736,9 +736,6 @@
 
     if (isPopup) {
       rememberWindowId();
-      hint.textContent = '面板在任意网站都可用；关闭面板不影响后台队列。';
-    } else {
-      hint.textContent = '面板固定在浏览器侧边栏；关闭侧边栏不影响后台队列。';
     }
 
     const refresh = async () => {

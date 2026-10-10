@@ -152,6 +152,18 @@ test('红包卡片保持原尺寸，弹出面板按卡片留位', () => {
   assert.ok(height && Number(height[1]) >= 600, '弹出面板高度放不下原尺寸的卡片：' + (height && height[1]));
 });
 
+test('底部提示行只在有消息时才出现', () => {
+  // 常驻的说明文案（「面板在任意网站都可用……」之类）只是占地方，已经在 v0.8.1 删掉；
+  // 提示行本身留着报后台错误与入队结果，空的时候必须收起高度。
+  const panel = readFileSync(join(root, 'panel.js'), 'utf8');
+  assert.equal(panel.includes('面板在任意网站都可用'), false, '又加回了常驻的提示文案');
+  assert.equal(panel.includes('面板固定在浏览器侧边栏'), false, '又加回了常驻的提示文案');
+  const css = readFileSync(join(root, 'panel.css'), 'utf8');
+  const empty = /\n\.hb-hint:empty \{[^}]*\}/.exec(css);
+  assert.ok(empty, '缺少 .hb-hint:empty 规则');
+  assert.match(empty[0], /display: none/, '空提示行没有收起高度');
+});
+
 test('关掉红包卡片后面板还能点', () => {
   // 宿主是固定定位、盖住整个面板的一层，关卡片时不撤掉就会吞掉面板的全部点击
   // （回归 bug：弹出红包再关闭，面板点不动，重开面板才恢复）。
