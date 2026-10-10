@@ -42,7 +42,7 @@ function emptyState() {
     settings: { ...DEFAULT_SETTINGS },
     paused: false,
     pausedReason: '',
-    lastStartedAt: 0,
+    lastFinishedAt: 0,
   };
 }
 
@@ -141,7 +141,19 @@ function normalizeState(raw) {
   loaded.settings = normalizeSettings(raw.settings);
   loaded.paused = Boolean(raw.paused);
   loaded.pausedReason = typeof raw.pausedReason === 'string' ? raw.pausedReason : '';
-  loaded.lastStartedAt = Number.isFinite(Number(raw.lastStartedAt)) ? Number(raw.lastStartedAt) : 0;
+  // 限速刻度是「上一次请求结束」的时刻。旧版本记的是开始时刻，迁移时取两者较大的
+  // 那个：只会让下一次请求多等一会儿，不会提前发出。
+  const finished = Number(raw.lastFinishedAt);
+  const legacyStarted = Number(raw.lastStartedAt);
+  loaded.lastFinishedAt = Math.max(
+    Number.isFinite(finished) ? finished : 0,
+    Number.isFinite(legacyStarted) ? legacyStarted : 0,
+  );
+  // 上次运行被打断在请求中途：那条请求的结果与结束时刻都无从得知，保守地按「刚刚结束」
+  // 起算，唤醒后的第一条请求再等满一个间隔。
+  if ((Array.isArray(raw.entries) ? raw.entries : []).some((item) => item?.status === 'running')) {
+    loaded.lastFinishedAt = Math.max(loaded.lastFinishedAt, Date.now());
+  }
   loaded.entries = (Array.isArray(raw.entries) ? raw.entries : [])
     .map(normalizeEntry)
     .filter(Boolean)
@@ -175,7 +187,7 @@ function snapshot() {
     settings: state.settings,
     paused: state.paused,
     pausedReason: state.pausedReason,
-    lastStartedAt: state.lastStartedAt,
+    lastFinishedAt: state.lastFinishedAt,
   };
 }
 
@@ -262,21 +274,48 @@ function gapMs() {
   return P.GAP_BASE_MS + P.clampGapExtra(state.settings.gapExtraMs);
 }
 
-// 等价于脚本版 sharedQuery：先读共享时间戳，等到间隔满足，写入时间戳后再发请求。
-// 时间戳存在 storage 里，所以 worker 被回收不会让下一次查询提前发出。
-async function sharedQuery(url) {
-  const gap = gapMs();
+// 等价于脚本版 sharedQuery，但刻度改成「上一次请求结束」：站点的冷却从它处理完上一次
+// 请求起算，用「上一次开始」当刻度会在响应慢或手动点击领取时提前发出去，撞上冷却。
+// 刻度落在 storage，worker 被回收也不会让下一次请求提前发出。
+function gapRemainingMs() {
+  const last = Number(state.lastFinishedAt) || 0;
+  if (last > Date.now()) throw new Error('系统时钟早于共享时间戳，未发送请求');
+  return Math.max(0, gapMs() - (Date.now() - last));
+}
+
+// 等到间隔满足才允许发下一次请求。同一次操作里连发的多个请求只在开始前等一次，
+// 期间不刷新刻度，所以「查询 + 领取」依旧是一条挨着一条。
+async function waitForGap() {
   for (;;) {
-    const last = Number(state.lastStartedAt) || 0;
-    if (last > Date.now()) throw new Error('系统时钟早于共享时间戳，未发送请求');
-    const wait = gap - (Date.now() - last);
-    if (wait <= 0) break;
+    const wait = gapRemainingMs();
+    if (wait <= 0) return;
     await sleep(Math.min(wait, WAIT_SLICE_MS));
   }
-  state.lastStartedAt = Date.now();
-  await commit();
-  return siteRequest(url, 'GET');
 }
+
+// 一次请求结束就是新刻度的起点：成功、失败、超时都算结束。
+async function markSettled() {
+  state.lastFinishedAt = Date.now();
+  try {
+    await commit();
+  } catch {
+    // 落盘失败不影响本轮判断：内存里的刻度已经生效，下一次请求照样按它等。
+  }
+}
+
+// 一次操作（一条口令的查询与领取、开奖看护轮询、详情读取）从等间隔开始，
+// 到它最后一次请求结束为止。
+async function throttled(task) {
+  await waitForGap();
+  try {
+    return await task();
+  } finally {
+    await markSettled();
+  }
+}
+
+// 只读查询本身不参与限速：由外层操作决定何时开始、何时算结束。
+const siteQuery = (url) => siteRequest(url, 'GET');
 
 let sessionPromise = null;
 
@@ -322,11 +361,15 @@ async function claimPacket(entry, packet) {
   claiming.add(entry.id);
   let sent = false;
   try {
-    // 发出前先落状态：请求一旦发出，结果未确认时历史里必须有痕迹。
+    // 发出前先落状态：请求一旦发出，结果未确认时历史里必须有痕迹。古法由点击触发，
+    // 领取是一次独立操作，同样要等「上一次结束 + 间隔」再发那一次 POST；协议模式下
+    // 队列那条操作已经等过，这里直接过。等待期间条目已在 claiming 里，重复点击被上面
+    // 的检查挡下，一次点击依旧只放行一次请求。
     entry.status = 'running';
-    entry.lines = match.concat(P.line('正在开启红包…', 'muted'));
+    entry.lines = match.concat(P.line(gapRemainingMs() > 0 ? '正在等待领取间隔…' : '正在开启红包…', 'muted'));
     entry.result = P.linesText(entry.lines);
     await commit();
+    await waitForGap();
     sent = true;
     const response = await siteRequest(P.grabUrl(packet.id), 'POST');
     const receipt = P.claimReceipt(response, packet);
@@ -344,11 +387,13 @@ async function claimPacket(entry, packet) {
     };
   } finally {
     claiming.delete(entry.id);
+    // 领取请求的结束也要刷新刻度：无论成功、失败还是超时，下一次都要从这一刻起等。
+    if (sent) await markSettled();
   }
 }
 
 async function runEntry(entry) {
-  const response = await sharedQuery(P.queryUrl(entry.code, entry.charset));
+  const response = await siteQuery(P.queryUrl(entry.code, entry.charset));
   const outcome = P.queryOutcome(response);
   if (!outcome.matched) return outcome;
 
@@ -434,7 +479,7 @@ function queuedEntries() {
 // 每条排队口令都保留计划开始时间：作废队首不会在时间表上留洞。
 function planQueue() {
   const gap = gapMs();
-  let cursor = Math.max(Date.now(), state.lastStartedAt ? state.lastStartedAt + gap : 0);
+  let cursor = Math.max(Date.now(), state.lastFinishedAt ? state.lastFinishedAt + gap : 0);
   for (const entry of state.entries) {
     if (entry.status === 'running') {
       cursor = Math.max(cursor, (entry.startedAt || Date.now()) + gap);
@@ -525,7 +570,8 @@ async function executeEntry(entry) {
 
   let outcome;
   try {
-    outcome = await runEntry(entry);
+    // 一条口令的「查询 + 领取」算一次操作：从等间隔开始，到最后一次请求结束为止。
+    outcome = await throttled(() => runEntry(entry));
   } catch (error) {
     outcome = {
       lines: [P.line('查询失败: ' + (error instanceof Error ? error.message : '请求失败') + '。请手动再试。', 'error')],
@@ -554,7 +600,8 @@ async function watchEntry(entry) {
     const packetId = String(entry.packet.id);
     let fresh = null;
     try {
-      const response = await sharedQuery(P.packetUrl(packetId));
+      // 看护轮询是一次独立操作：等间隔、只读一次、结束即刷新刻度。
+      const response = await throttled(() => siteQuery(P.packetUrl(packetId)));
       fresh = response.status === 200 ? response.response : null;
       // 看护每轮读回的红包就是最新的详情，顺手更新内存副本供面板读取。
       if (P.validPacket(fresh) && String(fresh.id) === packetId) rememberPacket(fresh);
@@ -680,7 +727,8 @@ async function readPacket(id, refresh) {
   let packet = livePackets.get(key) || null;
   if (!packet || refresh === true) {
     try {
-      const response = await sharedQuery(P.packetUrl(key));
+      // 详情刷新同样按一次操作限速：等间隔、只读一次、结束即刷新刻度。
+      const response = await throttled(() => siteQuery(P.packetUrl(key)));
       const fresh = response.status === 200 && P.validPacket(response.response)
         && String(response.response.id) === key ? response.response : null;
       if (fresh) packet = rememberPacket(fresh);

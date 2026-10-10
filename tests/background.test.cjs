@@ -126,6 +126,8 @@ async function createEnv({ stored = null, handler } = {}) {
     fetch: async (url, options = {}) => {
       const reply = handler(url, options, requests.length);
       requests.push({ url, method: options.method || 'GET', at: clock.now });
+      // reply.wait（毫秒，走假时钟）模拟慢响应：只有把刻度记在响应结束才会有意义。
+      if (reply.wait) await new Promise((resolve) => sandbox.setTimeout(resolve, reply.wait));
       return { status: reply.status, json: async () => (reply.body === undefined ? null : reply.body) };
     },
     AbortController,
@@ -211,11 +213,38 @@ test('两次查询至少间隔 5 秒，限速时间戳写入 storage', async () 
   assert.ok(env.requests[1].at - env.requests[0].at >= 5000, String(env.requests[1].at - env.requests[0].at));
 
   const stored = await env.stored();
-  assert.equal(stored.lastStartedAt, env.requests[1].at);
+  // 刻度记的是上一次请求「结束」的时刻（假响应瞬时返回，结束时刻即发出时刻）。
+  assert.equal(stored.lastFinishedAt, env.requests[1].at);
 
   const state = await env.send({ type: 'hb:state:get' });
   assert.deepEqual(plain(state.state.entries.map((item) => item.status)), ['done', 'done']);
   assert.equal(state.state.entries[0].result, '未匹配: 口令不存在');
+});
+
+test('间隔从「上一次结束」起算：响应慢也不会按开始时刻提前发出', async () => {
+  // 第一条查询 3 秒才返回，第二条要等到「第一条结束 + 5 秒」，也就是开始后 8 秒。
+  let call = 0;
+  const env = await createEnv({
+    handler: () => {
+      call += 1;
+      return call === 1 ? { status: 200, body: { error: '口令不存在' }, wait: 3000 } : { status: 200, body: { error: '口令不存在' } };
+    },
+  });
+  await env.send({
+    type: 'hb:submit',
+    codes: [{ code: HAPPY_CODE, charset: 'text' }, { code: HAPPY_CODE_2, charset: 'text' }],
+    claimMode: 'manual',
+  });
+  await env.flush();
+  assert.equal(env.requests.length, 1, '第一条立即发出');
+
+  await env.advance(3000);
+  assert.equal(env.requests.length, 1, '第一条的响应刚到，刻度从这一刻才重新起算');
+  await env.advance(4999);
+  assert.equal(env.requests.length, 1, '按开始时刻算会在第 5 秒发出，按结束时刻算还差 1 毫秒');
+  await env.advance(1);
+  assert.equal(env.requests.length, 2);
+  assert.equal(env.requests[1].at - env.requests[0].at, 8000, '响应耗时也算进间隔');
 });
 
 test('加时设置进入查询间隔', async () => {
@@ -298,11 +327,19 @@ test('古法：匹配后停在待开启，点击授权才领取一次', async ()
   assert.equal(denied.error, '缺少有效的领取授权，未发送领取请求');
   assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0, '没有真实点击授权就不发 POST');
 
-  const claimed = await env.send({ type: 'hb:claim', id, trusted: true });
+  // 领取同样等「上一次请求结束 + 间隔」：查询刚返回就点，POST 得等满 5 秒。
+  const approving = env.send({ type: 'hb:claim', id, trusted: true });
+  await env.flush();
+  assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0, '间隔未到不得发 POST');
+  await env.advance(4999);
+  assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0);
+  await env.advance(1);
+  const claimed = await approving;
   assert.equal(claimed.ok, true);
   const posted = env.requests.filter((item) => item.method === 'POST');
   assert.equal(posted.length, 1);
   assert.match(posted[0].url, /\/api\/hongbao\/p1\/grab$/);
+  assert.ok(posted[0].at - env.requests[0].at >= 5000, '领取要等上一次请求结束再加间隔');
 
   const entryAfter = claimed.state.entries[0];
   assert.equal(entryAfter.status, 'done');
@@ -363,12 +400,13 @@ test('worker 被回收后，running 条目记为中断且不自动重试', async
   assert.equal(env.requests.length, 0, '被打断的条目不会自动重发');
 });
 
-test('worker 回收后，限速时间戳仍挡住提前请求', async () => {
+test('worker 回收后，限速时间戳仍挡住提前请求（并迁移旧字段）', async () => {
   const env = await createEnv({
     stored: {
       entries: [entry({ id: 'wait', status: 'queued' })],
       removed: [],
       settings: {},
+      // 旧版本记的是「上一次开始」：迁移后一律当结束时刻用，只会多等，不会提前。
       lastStartedAt: START - 1000,
     },
     handler: okQuery({ error: '口令不存在' }),
@@ -380,6 +418,29 @@ test('worker 回收后，限速时间戳仍挡住提前请求', async () => {
   await env.advance(1);
   assert.equal(env.requests.length, 1);
   assert.ok(env.requests[0].at - (START - 1000) >= 5000);
+  const stored = await env.stored();
+  assert.equal(stored.lastFinishedAt, env.requests[0].at, '刻度按新字段写回');
+});
+
+test('唤醒时上一条请求被打断：下一次请求再等满一个间隔', async () => {
+  const env = await createEnv({
+    stored: {
+      entries: [
+        entry({ id: 'mid', status: 'running', startedAt: START - 1000, claimMode: 'direct', packetId: 'p9' }),
+        entry({ id: 'wait', code: HAPPY_CODE_2, status: 'queued', createdAt: START + 1 }),
+      ],
+      removed: [],
+      settings: {},
+      lastFinishedAt: START - 10000,
+    },
+    handler: okQuery({ error: '口令不存在' }),
+  });
+  await env.flush();
+  assert.equal(env.requests.length, 0, '被打断的请求结束时刻无从得知，先等满一个间隔');
+  await env.advance(4999);
+  assert.equal(env.requests.length, 0);
+  await env.advance(1);
+  assert.equal(env.requests.length, 1, '等满间隔后才接着跑队列');
 });
 
 test('删除按 ID 墓碑，另一个实例读回也不会复活', async () => {
@@ -457,7 +518,9 @@ test('详情卡片：领取回执带回结果与红包，详情按 id 只读读�
   const id = submit.state.entries[0].id;
 
   // 领取回执与当时那份红包一起回给面板，面板据此渲染金额与进度。
-  const claimed = await env.send({ type: 'hb:claim', id, trusted: true });
+  const approving = env.send({ type: 'hb:claim', id, trusted: true });
+  await env.advance(5000);
+  const claimed = await approving;
   assert.equal(claimed.ok, true);
   assert.equal(claimed.outcome.amount, 1.23);
   assert.equal(claimed.packet.id, 'p1');
@@ -524,7 +587,9 @@ test('古法抽奖：等手动参与，点击只报名一次，开奖后落到�
   assert.equal(awaiting.result, '等待手动参与抽选');
   assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0, '古法不自动报名抽奖');
 
-  const joined = await env.send({ type: 'hb:claim', id: awaiting.id, trusted: true });
+  const joining = env.send({ type: 'hb:claim', id: awaiting.id, trusted: true });
+  await env.advance(5000);
+  const joined = await joining;
   assert.equal(joined.ok, true);
   const posted = env.requests.filter((item) => item.method === 'POST');
   assert.equal(posted.length, 1);
@@ -578,7 +643,9 @@ test('开奖迟迟不来就收摊：写下未确认文案，队列继续可用',
   });
   const submit = await env.send({ type: 'hb:submit', codes: [{ code: LOTTERY_CODE, charset: 'text' }], claimMode: 'manual' });
   await env.flush();
-  await env.send({ type: 'hb:claim', id: submit.state.entries[0].id, trusted: true });
+  const joining = env.send({ type: 'hb:claim', id: submit.state.entries[0].id, trusted: true });
+  await env.advance(5000);
+  await joining;
   await env.flush();
 
   // 收摊时刻是 draw_at 之后 120 秒，也就是现在起 180 秒。
