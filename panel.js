@@ -662,10 +662,18 @@
       const next = displayMode(settings) === 'dock' ? 'float' : 'dock';
       patchSettings({ display: next === 'dock' ? 'sidebar' : 'panel' });
       if (next === 'dock') {
+        // 切到停靠：弹出面板里直接拉起侧边栏并收起自己。
         if (isPopup) {
-          // 切到停靠就直接把侧边栏拉起来；面板关掉，肉眼可见，不用再写一行说明。
           openSidebar();
         }
+        return;
+      }
+      // 切回悬浮：侧边栏里把自己收起来，开关才不会和实际形态对不上。
+      if (!isPopup) {
+        window.close();
+        // 万一这个浏览器不让侧边栏自收，页面还活着，就按实际形态改回停靠；
+        // 收掉了的话这里随页面一起没了，不会把设置又写回去。
+        setTimeout(() => { patchSettings({ display: 'sidebar' }); }, 400);
       }
     });
 
@@ -734,6 +742,20 @@
 
     if (isPopup) {
       rememberWindowId();
+    } else {
+      // 进到侧边栏这一形态就把它记成「停靠」（浏览器侧边栏菜单里手动打开也算），
+      // 免得开关显示的形态和眼前实际形态不一致。
+      patchSettings({ display: 'sidebar' });
+      // 侧边栏被收起（页面被销毁或切换走）时「停靠」就不成立了，把设置切回「悬浮」；
+      // 再露出来时记回「停靠」。只在真的变了时才写，省掉多余的存储写入。
+      const markDocked = (docked) => {
+        const wanted = docked ? 'sidebar' : 'panel';
+        if (settings.display !== wanted) patchSettings({ display: wanted });
+      };
+      window.addEventListener('pagehide', () => markDocked(false));
+      document.addEventListener('visibilitychange', () => {
+        markDocked(document.visibilityState === 'visible');
+      });
     }
 
     const refresh = async () => {

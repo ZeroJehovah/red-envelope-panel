@@ -179,6 +179,32 @@ test('面板里没有脚本版侧边栏之外的常驻提示区', () => {
   assert.match(panel, /text\('#hb-session-text'/, '登录检查结果没有写进配置面板');
 });
 
+test('卡片样式先到位再画，避免无样式一闪', () => {
+  // <link> 是异步的：暗色主题下卡片会先按 UA 默认样式画一帧，就是「底部按钮先亮一下
+  // 再变暗」。改成先把同包 css 读成 constructable stylesheet，开卡片时同步挂上。
+  const js = readFileSync(join(root, 'envelope.js'), 'utf8');
+  assert.match(js, /runtime\?\.getURL\?\.\(STYLE_HREF\)/, '没有读同包的卡片样式');
+  assert.match(js, /new CSSStyleSheet\(\)/, '没有把样式读成 constructable stylesheet');
+  assert.match(js, /shadowRoot\.adoptedStyleSheets = \[sheet\]/, '开卡片时没有同步挂上预读的样式表');
+  assert.match(js, /link\.addEventListener\('load', markStyled, \{ once: true \}\)/, '兜底路径没有等样式到位');
+  assert.match(js, /host\.style\.visibility = 'hidden'/, '兜底路径没有先藏住没样式的卡片');
+  assert.match(js, /^\s*loadStyles\(\);/m, '面板加载时没有预读样式');
+  assert.ok(existsSync(join(root, 'envelope.css')), '卡片样式不再是随包的一份文件');
+});
+
+test('停靠/悬浮开关跟着实际形态走', () => {
+  // 开关显示的形态必须和眼前实际形态一致：侧边栏在就是停靠，侧边栏收了就回悬浮。
+  const panel = readFileSync(join(root, 'panel.js'), 'utf8');
+  assert.match(panel, /patchSettings\(\{ display: 'sidebar' \}\);/, '侧边栏挂载时没有把设置对齐成停靠');
+  assert.match(panel, /const wanted = docked \? 'sidebar' : 'panel';/, '缺少停靠/悬浮的对照表');
+  assert.match(panel, /window\.addEventListener\('pagehide'/, '侧边栏收起（页面销毁）时没有回收');
+  assert.match(panel, /document\.addEventListener\('visibilitychange'/, '侧边栏被藏起来时没有回收');
+  assert.match(panel, /setTimeout\(\(\) => \{ patchSettings\(\{ display: 'sidebar' \}\); \}, 400\);/,
+    '侧边栏里切悬浮却收不掉时没有改回停靠');
+  // 弹出面板一侧的既有行为：切停靠要拉起侧边栏并收起自己。
+  assert.match(panel, /if \(isPopup\) \{\n          openSidebar\(\);/);
+});
+
 test('关掉红包卡片后面板还能点', () => {
   // 宿主是固定定位、盖住整个面板的一层，关卡片时不撤掉就会吞掉面板的全部点击
   // （回归 bug：弹出红包再关闭，面板点不动，重开面板才恢复）。

@@ -314,6 +314,11 @@
           await tick();
           await tick();
           check('点红包图标弹出信封卡片', Boolean(card()));
+          // 自检页是 file://，拿不到 chrome.runtime.getURL，走 <link> 兜底：
+          // 样式到位前卡片先藏着，绝不先画一帧没样式的卡片（暗色主题下那一下就是闪烁）。
+          check('卡片样式到位后才显示',
+            Boolean(host()) && host().style.visibility !== 'hidden',
+            host() ? (host().style.visibility || '(可见)') : 'null');
           check('卡片显示发件人与红包口令',
             inCard('#env-sender-name') && inCard('#env-sender-name').textContent === '来自 alice 的红包'
             && inCard('#env-footer-code') && inCard('#env-footer-code').textContent === '11775521',

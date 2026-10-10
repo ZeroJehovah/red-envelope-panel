@@ -20,6 +20,7 @@
 (function () {
   const P = globalThis.HBProtocol;
   const HOST_ID = 'hb-envelope-host';
+  const STYLE_HREF = 'envelope.css';
   // 卡片开着时给 body 打个标：弹出面板据此把窗口撑到浏览器上限，卡片才能按原尺寸铺开；
   // 卡片一关就撤掉，面板收回内容高度（侧边栏外壳不看这个类）。
   const CARD_OPEN_CLASS = 'hb-card-open';
@@ -157,18 +158,52 @@
   let host = null;
   let overlay = null;
   let card = null;
+  let shadowRoot = null;
+  // 卡片样式随包，但要等它到位再画卡片：<link> 是异步的，暗色主题下会先画一帧没样式的卡片
+  // （就是「底部按钮先亮一下再变暗」那一下闪）。所以先把同包的 css 读成一张 constructable
+  // stylesheet，之后每次开卡片都同步挂上；读不到就退回 <link>，并在样式到位前先藏着卡片。
+  let sheet = null;
+
+  function markStyled() {
+    if (host) host.style.visibility = '';
+  }
+
+  function loadStyles() {
+    // 只读同包资源（不是远程代码）；自检页是 file://，没有这层 API，会走 <link> 兜底。
+    const url = globalThis.chrome?.runtime?.getURL?.(STYLE_HREF);
+    if (!url || typeof CSSStyleSheet !== 'function') return;
+    fetch(url).then((response) => (response.ok ? response.text() : '')).then((css) => {
+      if (!css || sheet) return;
+      const next = new CSSStyleSheet();
+      next.replaceSync(css);
+      sheet = next;
+      if (shadowRoot) shadowRoot.adoptedStyleSheets = [next];
+      markStyled();
+    }).catch(() => {
+      // 读不到就继续用 <link>，卡片照样能开。
+    });
+  }
 
   function ensureOverlay() {
     if (overlay) return overlay;
     host = document.createElement('div');
     host.id = HOST_ID;
-    const root = host.attachShadow({ mode: 'open' });
-    const style = document.createElement('link');
-    style.rel = 'stylesheet';
-    style.href = 'envelope.css';
+    shadowRoot = host.attachShadow({ mode: 'open' });
+    if (sheet) {
+      shadowRoot.adoptedStyleSheets = [sheet];
+    } else {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = STYLE_HREF;
+      link.addEventListener('load', markStyled, { once: true });
+      shadowRoot.append(link);
+      // 样式没到之前先不把没样式的卡片画出来；同时留个兜底，别真的藏住不显示。
+      host.style.visibility = 'hidden';
+      setTimeout(markStyled, 400);
+    }
     overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
-    root.append(style, overlay);
+    shadowRoot.append(overlay);
     document.body.append(host);
     return overlay;
   }
@@ -210,6 +245,7 @@
     if (host) host.remove();
     host = null;
     overlay = null;
+    shadowRoot = null;
     document.body.classList.remove(CARD_OPEN_CLASS);
     if (typeof current.onClose === 'function') {
       try {
@@ -648,5 +684,8 @@
   }
 
   globalThis.HBEnvelope = { show, close: closeCard, hostId: HOST_ID };
+
+  // 面板一加载就把样式读好，用户点开卡片时就是同步挂载，不会先亮后暗。
+  loadStyles();
 })();
 
