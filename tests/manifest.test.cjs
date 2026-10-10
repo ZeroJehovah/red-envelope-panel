@@ -54,6 +54,25 @@ test('扩展页面不加载远程脚本或样式', () => {
   }
 });
 
+test('写请求的来源头由声明式规则改写成站点来源', () => {
+  // 站点只接受自己那一个 Origin，扩展发出的 POST 带着 chrome-extension://<id>
+  // 会被回 403「请求来源不合法」，领取与抽奖报名都发不出去。
+  assert.ok(manifest.permissions.includes('declarativeNetRequestWithHostAccess'),
+    '缺少 declarativeNetRequestWithHostAccess 权限');
+  const resources = manifest.declarative_net_request?.rule_resources || [];
+  assert.equal(resources.length, 1, '需要一份静态规则');
+  assert.equal(resources[0].enabled, true);
+  const ruleFile = join(root, resources[0].path);
+  assert.ok(existsSync(ruleFile), '规则文件不存在: ' + resources[0].path);
+  const rules = JSON.parse(readFileSync(ruleFile, 'utf8'));
+  const rewrite = rules.find((rule) => rule.action?.type === 'modifyHeaders'
+    && (rule.action.requestHeaders || []).some((header) => header.header.toLowerCase() === 'origin'
+      && header.operation === 'set' && header.value === 'https://hb.unsnow.org'));
+  assert.ok(rewrite, '规则必须把 Origin 改写成站点来源');
+  assert.deepEqual(rewrite.condition.resourceTypes, ['xmlhttprequest']);
+  assert.ok(rules.every((rule) => (rule.condition.urlFilter || '').includes('hb.unsnow.org')), '规则只作用于红包站');
+});
+
 test('面板版本号来自清单而不是硬编码', () => {
   const panel = readFileSync(join(root, 'panel.js'), 'utf8');
   assert.match(panel, /getManifest\(\)\.version/);

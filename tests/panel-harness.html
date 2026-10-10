@@ -178,6 +178,37 @@
             !sent.some((message) => message.type === 'hb:claim'),
             JSON.stringify(sent.filter((message) => message.type === 'hb:claim')));
 
+          // 抽奖红包：没报名时给「参与抽选」，报名之后只剩等待开奖。
+          const lotteryRow = {
+            id: 'lottery-1',
+            code: '11775521',
+            charset: 'numeric',
+            claimMode: 'manual',
+            status: 'awaiting',
+            result: '等待手动参与抽选',
+            lines: [{ text: '等待手动参与抽选', tone: 'muted' }],
+            packet: { id: '88', type: 'lottery', joined: false },
+            packetId: '88',
+            matched: true,
+            createdAt: 3,
+          };
+          state.entries.push(lotteryRow);
+          notify();
+          await tick();
+          const lotteryButton = document.querySelector('#hb-list .hb-row[data-id="lottery-1"] button[data-action="claim"]');
+          check('抽奖待参与条目的按钮是「参与抽选」',
+            Boolean(lotteryButton) && lotteryButton.textContent === '参与抽选',
+            lotteryButton && lotteryButton.textContent);
+
+          lotteryRow.packet = { id: '88', type: 'lottery', joined: true };
+          notify();
+          await tick();
+          const lotteryChip = document.querySelector('#hb-list .hb-row[data-id="lottery-1"] .hb-status');
+          check('已报名的抽奖显示等待开奖', Boolean(lotteryChip) && lotteryChip.textContent === '等待开奖',
+            lotteryChip && lotteryChip.textContent);
+          check('报名之后不再给写入动作',
+            !document.querySelector('#hb-list .hb-row[data-id="lottery-1"] button[data-action="claim"]'));
+
           click(document.querySelector('[data-switch="batch"]'));
           await tick();
           click(document.querySelector('[data-switch="charset"]'));

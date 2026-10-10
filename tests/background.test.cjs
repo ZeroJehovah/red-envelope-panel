@@ -49,6 +49,34 @@ const ACTIVE_PACKET = {
   mine: null,
 };
 
+const LOTTERY_CODE = '拼手气抽奖口令';
+const LOTTERY_PACKET = {
+  id: 'L1',
+  type: 'lottery',
+  status: 'active',
+  wish: '拼手气抽奖',
+  code: LOTTERY_CODE,
+  creator: { username: 'alice', linuxdo_id: 1 },
+  total_amount: 20,
+  count: 3,
+  claimed_amount: 0,
+  mine: null,
+  joined: false,
+  drawn_at: null,
+  draw_at: START + 60000,
+  server_now: START,
+};
+
+// 抽奖口令的三段网络：口令查询、报名 /grab、看护按 id 读红包。
+function lotteryHandler({ join, byId, query }) {
+  return (url) => {
+    if (url.endsWith('/api/me')) return sessionUser;
+    if (url.endsWith('/L1/grab')) return join();
+    if (url.endsWith('/api/hongbao/L1')) return byId();
+    return query ? query() : { status: 200, body: LOTTERY_PACKET };
+  };
+}
+
 // 沙箱：外壳只有 chrome API 与定时器替身，业务逻辑仍然是 src/background.js 本身。
 async function createEnv({ stored = null, handler } = {}) {
   const clock = { now: START };
@@ -415,5 +443,124 @@ test('队列跑完后清掉兜底闹钟', async () => {
   await env.flush();
   await env.advance(1000);
   assert.equal(env.alarms.has('hb-queue-tick'), false, '没有排队条目时不该留下闹钟');
+});
+
+test('古法抽奖：等手动参与，点击只报名一次，开奖后落到历史', async () => {
+  const drawn = {
+    ...LOTTERY_PACKET,
+    joined: true,
+    status: 'drawn',
+    drawn_at: START + 61000,
+    mine: 5,
+    winners: [{ linuxdo_id: 2, amount: 5, payout_status: 'paid' }],
+  };
+  const env = await createEnv({
+    handler: lotteryHandler({
+      join: () => ({ status: 200, body: { joined: true, already: false, packet: { ...LOTTERY_PACKET, joined: true } } }),
+      byId: () => ({ status: 200, body: drawn }),
+    }),
+  });
+  const submit = await env.send({ type: 'hb:submit', codes: [{ code: LOTTERY_CODE, charset: 'text' }], claimMode: 'manual' });
+  await env.flush();
+
+  const awaiting = submit.state.entries[0];
+  assert.equal(awaiting.status, 'awaiting');
+  assert.equal(awaiting.packet.type, 'lottery');
+  assert.equal(awaiting.result, '等待手动参与抽选');
+  assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0, '古法不自动报名抽奖');
+
+  const joined = await env.send({ type: 'hb:claim', id: awaiting.id, trusted: true });
+  assert.equal(joined.ok, true);
+  const posted = env.requests.filter((item) => item.method === 'POST');
+  assert.equal(posted.length, 1);
+  assert.match(posted[0].url, /\/api\/hongbao\/L1\/grab$/);
+  // 报名不是领取：行停在等待开奖，而不是“结果未确认”。
+  assert.equal(joined.state.entries[0].status, 'awaiting');
+  assert.equal(joined.state.entries[0].result, '已参与抽选，等待开奖');
+  assert.equal(joined.state.entries[0].packet.joined, true);
+
+  // 看护按 id 读红包，开奖后把中奖结果写回同一行。
+  await env.advance(5000);
+  const state = await env.send({ type: 'hb:state:get' });
+  assert.equal(state.state.entries[0].status, 'done');
+  assert.equal(state.state.entries[0].result, '已中奖: +5.00 LDC（已到账）');
+  assert.equal(state.state.paused, false);
+  assert.equal(env.requests.filter((item) => item.method === 'POST').length, 1, '看护不发写请求');
+});
+
+test('协议抽奖：后台自动报名并等开奖，不误报未确认', async () => {
+  const env = await createEnv({
+    handler: lotteryHandler({
+      join: () => ({ status: 200, body: { joined: true, already: true, packet: { ...LOTTERY_PACKET, joined: true } } }),
+      byId: () => ({ status: 200, body: { ...LOTTERY_PACKET, joined: true } }),
+    }),
+  });
+  await env.send({ type: 'hb:submit', codes: [{ code: LOTTERY_CODE, charset: 'text' }], claimMode: 'direct' });
+  await env.flush();
+
+  const state = await env.send({ type: 'hb:state:get' });
+  assert.equal(state.state.entries[0].claimMode, 'direct');
+  assert.equal(state.state.entries[0].status, 'awaiting');
+  assert.equal(state.state.entries[0].result, '已参与过抽选，等待开奖');
+  assert.equal(state.state.paused, false, '抽奖报名不该暂停队列');
+  assert.equal(env.requests.filter((item) => item.method === 'POST').length, 1);
+  assert.equal(env.alarms.has('hb-queue-tick'), true, '等开奖期间保留兜底闹钟');
+});
+
+test('开奖迟迟不来就收摊：写下未确认文案，队列继续可用', async () => {
+  const env = await createEnv({
+    handler: lotteryHandler({
+      join: () => ({ status: 200, body: { joined: true, already: false, packet: { ...LOTTERY_PACKET, joined: true } } }),
+      byId: () => ({ status: 200, body: { ...LOTTERY_PACKET, joined: true } }),
+    }),
+  });
+  const submit = await env.send({ type: 'hb:submit', codes: [{ code: LOTTERY_CODE, charset: 'text' }], claimMode: 'manual' });
+  await env.flush();
+  await env.send({ type: 'hb:claim', id: submit.state.entries[0].id, trusted: true });
+  await env.flush();
+
+  // 收摊时刻是 draw_at 之后 120 秒，也就是现在起 180 秒。
+  await env.advance(200000);
+  const state = await env.send({ type: 'hb:state:get' });
+  assert.equal(state.state.entries[0].status, 'done');
+  assert.equal(state.state.entries[0].result, '开奖结果未确认，请到红包站查看记录');
+  assert.equal(state.state.paused, false);
+  assert.ok(env.requests.filter((item) => item.url.endsWith('/api/hongbao/L1')).length > 1, '看护按 3 秒节奏重试');
+  assert.equal(env.alarms.has('hb-queue-tick'), false, '收摊后清掉兜底闹钟');
+});
+
+test('重载已报名的抽奖只重新装看护，不重复报名', async () => {
+  const stored = {
+    entries: [entry({
+      claimMode: 'manual',
+      status: 'awaiting',
+      packetId: 'L1',
+      matched: true,
+      packet: { id: 'L1', type: 'lottery', status: 'active', joined: true, creator: { username: 'alice', linuxdo_id: 1 }, draw_at: START + 60000, server_now: START },
+    })],
+    removed: [],
+    settings: {},
+    paused: false,
+    pausedReason: '',
+    lastStartedAt: 0,
+  };
+  const env = await createEnv({
+    stored,
+    handler: lotteryHandler({
+      join: () => ({ status: 200, body: { joined: true, already: true, packet: null } }),
+      byId: () => ({ status: 200, body: { ...LOTTERY_PACKET, joined: true, status: 'drawn', drawn_at: START + 61000, count: 3, winners: [] } }),
+      query: () => ({ status: 200, body: { ...LOTTERY_PACKET, joined: true } }),
+    }),
+  });
+  await env.flush();
+  const state = await env.send({ type: 'hb:state:get' });
+  assert.equal(state.state.entries[0].status, 'awaiting');
+  assert.equal(state.state.entries[0].result, '已参与抽选，等待开奖');
+  assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0, '已报名的口令不得再次报名');
+
+  await env.advance(5000);
+  const after = await env.send({ type: 'hb:state:get' });
+  assert.equal(after.state.entries[0].status, 'done');
+  assert.equal(after.state.entries[0].result, '未抽中');
 });
 

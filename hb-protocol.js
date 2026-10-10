@@ -2,7 +2,8 @@
  *
  * 从脚本版 browser/userscripts/linuxdo-hongbao-code-sidebar.user.js（v2.35.0）的 request /
  * receiptLines / packetOutcome 等函数移植，端点、判定顺序与文案保持一致；
- * 抽奖（lottery）只移植判定结论，实时参与与开奖回看由里程碑 6 接入。
+ * 抽奖（lottery）除判定结论外还移植了报名回执与开奖看护的时间窗；站内卡片与
+ * 实时参与者列表仍归里程碑 6。
  * 纯函数 + 常量：后台以 importScripts 引入，node 测试直接 require。
  */
 'use strict';
@@ -15,6 +16,12 @@
   const MAX_HISTORY_ENTRIES = 200;
   const UNCONFIRMED = '领取结果未确认，请到红包站核对记录；不会自动重试';
   const INTERRUPTED_RESULT = '执行被后台回收中断，结果未确认';
+  const DRAW_POLL_INTERVAL_MS = 3000;   // 开奖轮询间隔
+  const DRAW_WATCH_LIMIT_MS = 120000;   // 过了 draw_at 还等不到开奖就收摊
+  const AWAIT_MANUAL_LINE = '等待手动开启';
+  const LOTTERY_AWAIT_LINE = '等待手动参与抽选';
+  const LOTTERY_JOINED_LINE = '已参与抽选，等待开奖';
+  const DRAW_UNCONFIRMED = '开奖结果未确认，请到红包站查看记录';
   const TONES = ['normal', 'success', 'error', 'muted'];
 
   const PACKET_TYPE_TEXT = {
@@ -68,6 +75,10 @@
   // 数字口令走 code/，文本口令走 text-code/，两种字符集在站上是两条路径。
   const queryUrl = (code, charset) => url((charset === 'numeric' ? 'code/' : 'text-code/') + encodeURIComponent(code));
   const grabUrl = (packetId) => url(encodeURIComponent(packetId) + '/grab');
+  // 开奖看护按 id 直接读红包本身，脚本版的轮询用的是同一条路径。
+  const packetUrl = (packetId) => url(encodeURIComponent(packetId));
+
+  const isLottery = (packet) => packet?.type === 'lottery';
 
   function validPacket(packet) {
     return Boolean(packet && ['string', 'number'].includes(typeof packet.id) && String(packet.id)
@@ -99,6 +110,8 @@
       mine: packet.mine == null ? null : Number(packet.mine),
       joined: Boolean(packet.joined),
       drawn_at: packet.drawn_at ?? null,
+      draw_at: Number.isFinite(Number(packet.draw_at)) ? Number(packet.draw_at) : null,
+      server_now: Number.isFinite(Number(packet.server_now)) ? Number(packet.server_now) : null,
     };
   }
 
@@ -150,9 +163,32 @@
 
   /* -------------------------------- 领取结果 -------------------------------- */
 
+  // 报名抽奖不是发放：站点回 { joined, already, packet }，钱要等服务器在 draw_at
+  // 开奖；已经关门的抽选回 409 加一句错误文案，那属于正常结论而不是队列故障。
+  function lotteryReceiptLines(response, data) {
+    const message = errorMessage(data);
+    if (message) return { lines: [line('参与失败: ' + message, 'error')], joined: false };
+    if (response.status < 200 || response.status >= 300) {
+      return { lines: [line('参与结果未确认: HTTP ' + response.status + '，请到红包站核对状态', 'error')], pause: true };
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data) || data.error) {
+      return { lines: [line(UNCONFIRMED, 'error')], pause: true };
+    }
+    const fresh = validPacket(data.packet) ? data.packet : null;
+    if (!fresh && !data.joined && !data.already) {
+      return { lines: [line(UNCONFIRMED, 'error')], pause: true };
+    }
+    return {
+      lines: [line(data.already ? '已参与过抽选，等待开奖' : LOTTERY_JOINED_LINE, 'success')],
+      joined: true,
+      packet: fresh,
+    };
+  }
+
   // pause 表示这一条不该让队列继续往下跑。
-  function claimReceipt(response) {
+  function claimReceipt(response, packet = null) {
     const data = response.response;
+    if (isLottery(packet)) return lotteryReceiptLines(response, data);
     const message = errorMessage(data);
     if (message) return { lines: [line('领取失败: ' + message, 'error')] };
     if (response.status < 200 || response.status >= 300) {
@@ -175,6 +211,18 @@
       return { lines: [line('领取成功: +' + Number(amount).toFixed(2) + ' LDC', 'success')], amount: Number(amount) };
     }
     return { lines: [line(UNCONFIRMED, 'error')], pause: true };
+  }
+
+  /* ------------------------------- 开奖看护 ------------------------------- */
+
+  // 看护的收摊时刻：draw_at 与 server_now 都来自服务器，本地钟偏不会让看护提前
+  // 放弃；过了 draw_at 再等 DRAW_WATCH_LIMIT_MS 仍没开奖才算未确认。
+  function watchDeadline(packet, now) {
+    const drawAt = Number(packet?.draw_at);
+    const serverNow = Number(packet?.server_now);
+    const offset = Number.isFinite(serverNow) ? serverNow - now : 0;
+    const remaining = Number.isFinite(drawAt) ? Math.max(0, drawAt - (now + offset)) : 0;
+    return now + remaining + DRAW_WATCH_LIMIT_MS;
   }
 
   /* ------------------------------ 不可领取判定 ------------------------------ */
@@ -278,6 +326,12 @@
     MAX_HISTORY_ENTRIES,
     UNCONFIRMED,
     INTERRUPTED_RESULT,
+    DRAW_POLL_INTERVAL_MS,
+    DRAW_WATCH_LIMIT_MS,
+    AWAIT_MANUAL_LINE,
+    LOTTERY_AWAIT_LINE,
+    LOTTERY_JOINED_LINE,
+    DRAW_UNCONFIRMED,
     line,
     normalizeLines,
     linesText,
@@ -285,13 +339,17 @@
     sessionUrl,
     queryUrl,
     grabUrl,
+    packetUrl,
+    isLottery,
     validPacket,
     hasMatchedPacket,
+    isPacketCreator,
     packetSnapshot,
     matchLines,
     packetStatusText,
     queryOutcome,
     claimReceipt,
+    watchDeadline,
     packetOutcome,
     clampGapExtra,
   };

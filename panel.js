@@ -347,9 +347,19 @@
     return pad(date.getHours()) + ':' + pad(date.getMinutes());
   }
 
-  // 一条历史能给的动作：等待点击的开、排队中的作废、已完结的删除；执行中不给动作。
+  // 报名过的抽奖在等开奖，页面侧不再给写入动作。
+  function statusLabel(entry) {
+    if (entry.status === 'awaiting' && entry.packet?.joined) return '等待开奖';
+    return STATUS_LABEL[entry.status] || '未知';
+  }
+
+  // 一条历史能给的动作：等待点击的开启/参与抽选、排队中的作废、已完结的删除；
+  // 执行中不给动作，抽奖报名后也不再给动作。
   function actionFor(entry) {
-    if (entry.status === 'awaiting' && entry.claimMode === 'manual') return { action: 'claim', label: '开红包', primary: true };
+    if (entry.status === 'awaiting' && entry.packet?.joined) return { action: 'delete', label: '删除' };
+    if (entry.status === 'awaiting' && entry.claimMode === 'manual') {
+      return { action: 'claim', label: entry.packet?.type === 'lottery' ? '参与抽选' : '开红包', primary: true };
+    }
     if (entry.status === 'queued') return { action: 'void', label: '作废' };
     if (entry.status === 'running') return null;
     return { action: 'delete', label: '删除' };
@@ -383,7 +393,7 @@
       code.textContent = String(entry.code || '（无口令）');
       const status = document.createElement('span');
       status.className = 'hb-status ' + (STATUS_CLASS[entry.status] || 'hb-status--idle');
-      status.textContent = STATUS_LABEL[entry.status] || '未知';
+      status.textContent = statusLabel(entry);
       head.append(code, status);
       item.append(head);
 

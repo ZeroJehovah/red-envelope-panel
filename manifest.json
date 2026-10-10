@@ -1,17 +1,27 @@
 {
   "manifest_version": 3,
   "name": "红包口令面板",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "在浏览器弹出面板或常显侧边栏提交 hb.unsnow.org 红包口令，支持古法/协议领取、批量队列与历史记录；面板与站点无关，浏览任意网站时都可使用。",
   "minimum_chrome_version": "116",
   "permissions": [
     "storage",
     "sidePanel",
-    "alarms"
+    "alarms",
+    "declarativeNetRequestWithHostAccess"
   ],
   "host_permissions": [
     "https://hb.unsnow.org/*"
   ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "hb-site-origin",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'none'; img-src 'self' data:; connect-src 'self' https://hb.unsnow.org"
   },

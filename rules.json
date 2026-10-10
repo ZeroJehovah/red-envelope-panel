@@ -1,0 +1,17 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "origin", "operation": "set", "value": "https://hb.unsnow.org" },
+        { "header": "referer", "operation": "set", "value": "https://hb.unsnow.org/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "|https://hb.unsnow.org/api/",
+      "resourceTypes": ["xmlhttprequest"]
+    }
+  }
+]

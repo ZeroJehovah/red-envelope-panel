@@ -11,6 +11,7 @@
 ```text
 src/
 ├── manifest.json      # WebExtension 清单（MV3，Chrome 116+，side panel）
+├── rules.json         # 静态声明式规则：把 /api/ 写请求的 Origin/Referer 改写成站点来源
 ├── browser-shim.js    # browser/chrome 兼容层，暴露 globalThis.HBApi
 ├── code-rules.js      # 口令清洗、分享文案取词与校验规则（纯逻辑，暴露 globalThis.HBCodes）
 ├── hb-protocol.js     # 红包站协议层：端点、错误文案与结果行（纯函数，暴露 globalThis.HBProtocol）
@@ -31,6 +32,7 @@ src/
 - **口令规则**：字符清洗、分享文案取词与校验集中在 `code-rules.js`（暴露 `globalThis.HBCodes`），面板与 `node --test` 共用同一份实现；规则按脚本版原样保留（含站点标识匹配），不要在两处各写一份。
 - **协议层**：端点、错误文案与结果行集中在 `hb-protocol.js`（暴露 `globalThis.HBProtocol`），后台与 `node --test` 共用；文案按脚本版移植，改文案只改这一处。
 - **网络**：只允许访问 `https://hb.unsnow.org`；跨域请求只能由后台 service worker 发起（`credentials: 'include'` 携带会话 Cookie，15 秒超时），扩展页面不得直接请求。
+- **写请求来源**：站点 POST 接口只认自己那一个 `Origin`，扩展自动附带的 `Origin: chrome-extension://<id>` 会被回 403「请求来源不合法」。因此清单常带 `declarativeNetRequestWithHostAccess` 权限与 `rules.json`（改写 `https://hb.unsnow.org/api/` 的 `Origin`/`Referer`）；两者必须在同一次改动里保持同步，`tests/manifest.test.cjs` 会守住这条。
 - **站点无关**：不注册内容脚本、不注入页面 DOM 或样式、不依赖任何浏览站点的 DOM 结构；可选的站点内嵌模式必须单独引入权限并在此处登记。
 - **状态**：`chrome.storage.local` 的 `hb-state-v1` 是唯一真实来源；所有写入必须经后台消息接口，扩展页面不做本地副本。
 - **领取授权**：任何写操作（领取、参与抽奖）都必须由真实用户点击授权，一次点击只放行一次请求；已发送的领取不自动重试。

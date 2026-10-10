@@ -5,6 +5,7 @@
  *   - 请求只由后台发出，携带 hb.unsnow.org 会话 Cookie（credentials: 'include'）；
  *   - 限速时间戳落在 chrome.storage.local，worker 被回收后仍然生效；
  *   - 领取必须是真实点击授权后的一次性请求，发出后不自动重试；
+ *   - 抽奖报名后停在 awaiting，由开奖看护按 id 只读轮询到开奖；
  *   - 删除按 ID 墓碑，写入按 ID 合并，绝不整体覆盖历史。
  *
  * MV3 提示：worker 空闲即休眠，内存变量不可跨唤醒保留，因此状态读回与限速时间戳都以
@@ -84,7 +85,7 @@ function normalizeEntry(raw) {
     createdAt: Number.isFinite(Number(raw.createdAt)) ? Number(raw.createdAt) : Date.now(),
     startedAt: Number.isFinite(startedAt) ? startedAt : null,
     finishedAt: interrupted ? Date.now() : (Number.isFinite(finishedAt) ? finishedAt : null),
-    scheduledAt: null,
+    scheduledAt: null, // watchUntil/watchNextAt 有意不落库：重载后重新查询口令再装看护
   };
 }
 
@@ -225,6 +226,10 @@ async function commit() {
 
 /* -------------------------------- 请求代理 -------------------------------- */
 
+// 站点的写接口只认自己那一个 Origin：扩展发出的 POST 带着
+// Origin: chrome-extension://<id>，会被回 403「请求来源不合法」。
+// rules.json 里的静态声明式规则把 /api/ 请求的 Origin 与 Referer 改写成站点来源
+// （对站点自己页面发出的请求就是原值，等于没有副作用），只读的 GET 不受影响。
 async function siteRequest(url, method) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), P.REQUEST_TIMEOUT_MS);
@@ -311,8 +316,10 @@ async function claimPacket(entry, packet) {
     await commit();
     sent = true;
     const response = await siteRequest(P.grabUrl(packet.id), 'POST');
-    const receipt = P.claimReceipt(response);
-    return { ...receipt, lines: match.concat(receipt.lines) };
+    const receipt = P.claimReceipt(response, packet);
+    // 抽奖报名成功不是终局：条目停在 awaiting，由开奖看护轮询到开奖。
+    if (receipt.joined) entry.packet = P.packetSnapshot(receipt.packet || { ...packet, joined: true });
+    return { ...receipt, awaiting: receipt.joined === true, lines: match.concat(receipt.lines) };
   } catch (error) {
     const reason = error instanceof Error ? error.message : '请求失败';
     return {
@@ -337,13 +344,53 @@ async function runEntry(entry) {
   await commit();
 
   const user = await packetSession();
+  // 抽奖有自己的时钟：报名一次，钱等服务器在 draw_at 开奖，所以不套普通红包的终局判定。
+  if (P.isLottery(packet)) return runLotteryEntry(entry, packet, user);
+
   const decision = P.packetOutcome(packet, user);
   // 不可领取的红包只更新历史，详情由面板按需展开。
   if (decision) return decision;
 
   // 领取方式在提交时固定：改设置不会自动开启已经查到的红包。
   if (entry.claimMode !== 'direct') {
-    const lines = P.matchLines(packet).concat(P.line('等待手动开启', 'muted'));
+    const lines = P.matchLines(packet).concat(P.line(P.AWAIT_MANUAL_LINE, 'muted'));
+    entry.status = 'awaiting';
+    entry.lines = lines;
+    entry.result = P.linesText(lines);
+    await commit();
+    return { awaiting: true, lines };
+  }
+  return claimPacket(entry, packet);
+}
+
+// 抽奖红包：/grab 只是报名，钱等服务器在 draw_at 开奖。重载会让条目回到队列重新
+// 查一次口令，看到 joined 就重新装上同一个看护，所以本地不需要持久化任何定时器。
+async function runLotteryEntry(entry, packet, user) {
+  const match = P.matchLines(packet);
+  // 已经抽完（或不再可参与）的抽奖是终局，判定与历史行共用 packetOutcome。
+  if (packet.status !== 'active' || packet.drawn_at) return P.packetOutcome(packet, user);
+  if (P.isPacketCreator(packet, user)) {
+    return {
+      title: '这是你发出的红包',
+      amount: packet.claimed_amount || 0,
+      detail: '口令 ' + (packet.code || entry.code),
+      lines: match.concat(P.line('未参与: 这是你发出的红包', 'muted')),
+    };
+  }
+  if (packet.joined) {
+    return { awaiting: true, lines: match.concat(P.line(P.LOTTERY_JOINED_LINE, 'success')) };
+  }
+  // 站点要求它自己的会话，没登录就不发报名请求。
+  if (!user) {
+    return {
+      title: '请先登录红包站',
+      amount: 0,
+      detail: '未确认红包站登录状态，请到红包站登录后再试',
+      lines: match.concat(P.line('未参与: 未确认红包站登录状态，请到红包站登录后再试', 'muted')),
+    };
+  }
+  if (entry.claimMode !== 'direct') {
+    const lines = match.concat(P.line(P.LOTTERY_AWAIT_LINE, 'muted'));
     entry.status = 'awaiting';
     entry.lines = lines;
     entry.result = P.linesText(lines);
@@ -393,7 +440,9 @@ function clearTimer() {
 
 async function syncAlarm() {
   if (!api.alarms) return;
-  const pending = !state.paused && state.entries.some((entry) => entry.status === 'queued');
+  // 队列要跑，或者还有抽奖在等开奖，都需要心跳兜底（worker 被回收后靠它接着跑）。
+  const pending = (!state.paused && state.entries.some((entry) => entry.status === 'queued'))
+    || watchedEntries().length > 0;
   if (pending) {
     await api.alarms.create(TICK_ALARM, { delayInMinutes: TICK_ALARM_MINUTES, periodInMinutes: TICK_ALARM_MINUTES });
   } else {
@@ -406,12 +455,16 @@ async function tick() {
   clearTimer();
   if (executing) return;
   planQueue();
-  const next = state.entries.find((entry) => entry.status === 'queued');
-  if (state.paused || !next) {
+  // 队列优先：查询与领取排在前面，队列空下来才轮询开奖，两者共用同一份限速节奏。
+  const next = state.paused ? null : state.entries.find((entry) => entry.status === 'queued');
+  const watch = next ? null : watchedEntries()[0];
+  if (!next && !watch) {
     await syncAlarm();
     return;
   }
-  const delay = Math.max(0, (next.scheduledAt || 0) - Date.now());
+  const delay = next
+    ? Math.max(0, (next.scheduledAt || 0) - Date.now())
+    : Math.max(0, (Number(watch.watchNextAt) || 0) - Date.now());
   await syncAlarm();
   if (delay > 0) {
     timer = setTimeout(() => {
@@ -420,7 +473,8 @@ async function tick() {
     }, Math.min(delay, WAIT_SLICE_MS));
     return;
   }
-  executeEntry(next).catch(() => {});
+  if (next) executeEntry(next).catch(() => {});
+  else watchEntry(watch).catch(() => {});
 }
 
 // 一条口令的终局：awaiting 停在等待点击，pause 表示不该让队列继续往下跑。
@@ -430,6 +484,14 @@ async function settle(entry, outcome) {
   entry.result = P.linesText(entry.lines);
   entry.finishedAt = outcome.awaiting ? null : Date.now();
   entry.scheduledAt = null;
+  // 报名过的抽奖进看护：看护只活在这轮 worker 里，重载靠重新查询口令再装一次。
+  if (entry.status === 'awaiting' && P.isLottery(entry.packet) && entry.packet.joined === true) {
+    entry.watchUntil = P.watchDeadline(entry.packet, Date.now());
+    entry.watchNextAt = Date.now();
+  } else {
+    entry.watchUntil = null;
+    entry.watchNextAt = null;
+  }
   if (outcome.pause) {
     state.paused = true;
     state.pausedReason = entry.result;
@@ -456,6 +518,53 @@ async function executeEntry(entry) {
   }
   executing = false;
   await settle(entry, outcome);
+  if (!state.paused) scheduleTick();
+}
+
+/* ------------------------------- 开奖看护 ------------------------------- */
+
+// 报名过的抽奖条目都算看护对象：等到 draw_at，过了点再等 DRAW_WATCH_LIMIT_MS。
+// 看护只读红包本身（GET），不发任何写请求，所以被删除或作废时不会留下半条记录。
+function watchedEntries() {
+  return state.entries.filter((entry) => entry.status === 'awaiting'
+    && P.isLottery(entry.packet) && entry.packet.joined === true
+    && typeof entry.packet.id === 'string' && entry.packet.id);
+}
+
+async function watchEntry(entry) {
+  executing = true;
+  let settled = false;
+  try {
+    const packetId = String(entry.packet.id);
+    let fresh = null;
+    try {
+      const response = await sharedQuery(P.packetUrl(packetId));
+      fresh = response.status === 200 ? response.response : null;
+    } catch {
+      // 查询失败不结束看护：下一次心跳接着试，直到收摊时刻。
+    }
+    // 条目可能在等网络时被删掉或作废：那时什么都不要写回去。
+    if (!state.entries.some((item) => item.id === entry.id)) return;
+    if (P.validPacket(fresh) && String(fresh.id) === packetId
+      && (fresh.drawn_at || fresh.status !== 'active')) {
+      const user = await packetSession();
+      const outcome = P.packetOutcome(fresh, user);
+      if (outcome) {
+        entry.packet = P.packetSnapshot(fresh);
+        await settle(entry, outcome);
+        settled = true;
+      }
+    }
+  } finally {
+    executing = false;
+  }
+  if (!settled) {
+    if (Date.now() >= Number(entry.watchUntil)) {
+      await settle(entry, { lines: P.matchLines(entry.packet).concat(P.line(P.DRAW_UNCONFIRMED, 'error')) });
+    } else {
+      entry.watchNextAt = Date.now() + P.DRAW_POLL_INTERVAL_MS;
+    }
+  }
   if (!state.paused) scheduleTick();
 }
 
