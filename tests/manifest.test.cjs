@@ -34,6 +34,16 @@ test('版本号符合语义化版本', () => {
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
 });
 
+test('图标是方形 PNG，尺寸与文件名一致', () => {
+  // 图标由 tools/make-icons.py 光栅化生成，尺寸写错时工具栏与扩展页会取错资源。
+  for (const size of [16, 32, 48, 128]) {
+    const png = readFileSync(join(root, 'icons', 'icon' + size + '.png'));
+    assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', 'icon' + size + '.png 不是 PNG');
+    assert.equal(png.readUInt32BE(16), size, 'icon' + size + '.png 宽度不对');
+    assert.equal(png.readUInt32BE(20), size, 'icon' + size + '.png 高度不对');
+  }
+});
+
 test('清单引用的文件都存在', () => {
   const missing = referencedFiles(manifest).filter((file) => !existsSync(join(root, file)));
   assert.deepEqual(missing, []);
