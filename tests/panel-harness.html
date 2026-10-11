@@ -5,12 +5,14 @@
      D:\Green Files\chrome plugins\red-envelope-panel\），再用 Chrome 打开；页面用最小
      chrome API 替身挂载 panel.js，跑完把结果写进 #harness-result，标题变为 HARNESS-PASS / HARNESS-FAIL。
 
-     无头运行示例（Windows 版 Chrome for Testing；窗口至少 424×668，卡片才会铺到原尺寸
-     384×624，否则只验证宽度，高度按视口推算）：
+     无头运行示例（Windows 版 Chrome for Testing；面板自己不画卡片，窗口给到 560×900 只是
+     按常用尺寸渲染）：
        chrome.exe --headless=new --disable-gpu --virtual-time-budget=5000 \
          --window-size=560,900 \
          --user-data-dir="D:\Green Files\ChromeForTestingProfiles\panel-harness" \
          --dump-dom "file:///D:/Green%20Files/chrome%20plugins/red-envelope-panel/panel-harness.html"
+
+     红包卡片自 v0.9.7 起在独立窗口里显示，它的 DOM 自检在 card-harness.html。
 -->
 <html lang="zh-CN">
   <head>
@@ -27,6 +29,14 @@
       const listeners = [];
       const sidePanelOpens = [];
       let closeCalls = 0;
+      // 详情窗口的替身记录：面板开窗、拉前、收掉旧窗口的参数都记下来供断言。
+      const CARD_WINDOW_KEY = 'hb-card-window';
+      const cardWindows = [];
+      const windowUpdates = [];
+      const windowRemovals = [];
+      const sessionBag = {};
+      let nextWindowId = 100;
+      const cardEntryId = (url) => new URL(url).searchParams.get('id');
       window.close = () => { closeCalls += 1; };
       const state = {
         entries: [],
@@ -59,6 +69,7 @@
       globalThis.chrome = {
         runtime: {
           getManifest: () => ({ version: 'harness' }),
+          getURL: (path) => 'chrome-extension://harness/' + path,
           sendMessage: async (message) => {
             sent.push(message);
             if (message.type === 'hb:state:get') return { ok: true, state };
@@ -111,9 +122,41 @@
             return { ok: false, error: '未知消息：' + String(message.type) };
           },
         },
-        storage: { onChanged: { addListener: (listener) => listeners.push(listener) } },
-        tabs: { create: () => {} },
-        windows: { getCurrent: async () => ({ id: 1 }) },
+        storage: {
+          onChanged: { addListener: (listener) => listeners.push(listener) },
+          session: {
+            get: async (key) => (key in sessionBag ? { [key]: sessionBag[key] } : {}),
+            set: async (items) => { Object.assign(sessionBag, items); },
+            remove: async (key) => { delete sessionBag[key]; },
+          },
+        },
+        tabs: {
+          create: () => {},
+        },
+        windows: {
+          getCurrent: async () => ({ id: 1 }),
+          // 面板开出去的详情窗口：这里只记参数并把窗口号登记进会话存储（真实浏览器里是窗口
+          // 里的 card.js 自己登记，面板凭这条记录复用窗口）。
+          create: async (props) => {
+            const id = nextWindowId;
+            nextWindowId += 1;
+            cardWindows.push({ id, ...props });
+            sessionBag[CARD_WINDOW_KEY] = { windowId: id, entryId: cardEntryId(props.url) };
+            return { id, tabs: [{ id: id * 10 }] };
+          },
+          get: async (id) => {
+            const found = cardWindows.find((item) => item.id === id);
+            if (!found) throw new Error('窗口已关闭');
+            return { id, tabs: [{ id: id * 10 }] };
+          },
+          update: async (id, props) => { windowUpdates.push({ id, ...props }); return { id }; },
+          // 关掉窗口：从替身里划掉，之后 windows.get 会失败（跟真的关掉了一样）。
+          remove: async (id) => {
+            windowRemovals.push(id);
+            const index = cardWindows.findIndex((item) => item.id === id);
+            if (index >= 0) cardWindows.splice(index, 1);
+          },
+        },
         sidePanel: { open: async (options) => { sidePanelOpens.push(options); } },
       };
     </script>
@@ -140,11 +183,6 @@
         const row = (id) => document.querySelector('#hb-list .hb-entry[data-id="' + id + '"]');
         const rows = () => document.querySelectorAll('#hb-list .hb-entry');
         const click = (node) => node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        // 元素中心点上真正吃点击的是谁：用来验证关掉卡片后面板没有被透明宿主盖住。
-        const centerProbe = (node) => {
-          const box = node.getBoundingClientRect();
-          return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
-        };
         const type = (field, value) => {
           field.value = value;
           field.dispatchEvent(new Event('input', { bubbles: true }));
@@ -157,9 +195,7 @@
         const TICK = String.fromCharCode(96);
         const share = (code) => '我向你分享了一个LDC红包，打开 ' + TICK + 'hb.unsnow.org' + TICK
           + ' ，输入口令 ' + TICK + code + TICK + ' 领取';
-        const host = () => document.getElementById('hb-envelope-host');
-        const card = () => host() && host().shadowRoot && host().shadowRoot.querySelector('.redpacket-envelope');
-        const inCard = (selector) => (card() ? card().querySelector(selector) : null);
+        const openButton = (id) => (row(id) ? row(id).querySelector('button[data-action="open"]') : null);
 
         try {
           globalThis.HBPanel.mount(document.getElementById('app'), { shell: 'popup' });
@@ -288,7 +324,7 @@
           check('填入后计数跟着走', counter().textContent === '8/8', counter().textContent);
           input().value = '';
 
-          // 普通红包：先用历史快照出卡片，再补上只读详情；写入只能由卡片上的真实点击触发。
+          // 普通红包：点「开红包」= 开一个独立的详情窗口（面板自己不再画卡片）。
           state.entries.push({
             id: 'awaiting-1',
             code: '11775521',
@@ -305,7 +341,7 @@
           notify();
           await tick();
           await tick();
-          const open = row('awaiting-1').querySelector('button[data-action="open"]');
+          const open = openButton('awaiting-1');
           check('待开启条目出现红包详情按钮', Boolean(open), open && open.className);
           check('待开启的时间列显示「待开启」',
             row('awaiting-1').querySelector('.hb-entry-time').textContent === '待开启',
@@ -313,26 +349,28 @@
           if (open) click(open);
           await tick();
           await tick();
-          check('点红包图标弹出信封卡片', Boolean(card()));
-          // 自检页是 file://，拿不到 chrome.runtime.getURL，走 <link> 兜底：
-          // 样式到位前卡片先藏着，绝不先画一帧没样式的卡片（暗色主题下那一下就是闪烁）。
-          check('卡片样式到位后才显示',
-            Boolean(host()) && host().style.visibility !== 'hidden',
-            host() ? (host().style.visibility || '(可见)') : 'null');
-          check('卡片显示发件人与红包口令',
-            inCard('#env-sender-name') && inCard('#env-sender-name').textContent === '来自 alice 的红包'
-            && inCard('#env-footer-code') && inCard('#env-footer-code').textContent === '11775521',
-            inCard('#env-footer-code') && inCard('#env-footer-code').textContent);
-          check('头像用随包的兜底 SVG',
-            String((inCard('#env-creator-avatar') || {}).src || '').startsWith('data:image/svg+xml'));
-          check('卡片给出开启按钮', Boolean(inCard('#btn-open-packet')));
-          if (inCard('#btn-open-packet')) click(inCard('#btn-open-packet'));
+          const opened = cardWindows[0];
+          check('点红包图标开出一个独立窗口', Boolean(opened) && cardWindows.length === 1, JSON.stringify(cardWindows));
+          check('详情窗口指向 card.html 并带上红包 id',
+            Boolean(opened) && opened.url === 'chrome-extension://harness/card.html?id=awaiting-1',
+            opened && opened.url);
+          check('详情窗口是无标签栏的弹窗',
+            Boolean(opened) && opened.type === 'popup' && opened.focused === true,
+            opened && String(opened.type));
+          check('开窗尺寸按普通红包卡片算（424×668 视口加外框估量）',
+            Boolean(opened) && opened.width === 440 && opened.height === 708,
+            opened && (opened.width + '×' + opened.height));
+          check('面板自己不留卡片宿主', document.getElementById('hb-envelope-host') === null);
+          // 同一个红包再点一次：把已有窗口拉到前面就行，不再开第二个。
+          if (openButton('awaiting-1')) click(openButton('awaiting-1'));
           await tick();
-          check('合成点击不授权领取（isTrusted 校验）',
-            !sent.some((message) => message.type === 'hb:claim'),
-            JSON.stringify(sent.filter((message) => message.type === 'hb:claim')));
+          await tick();
+          check('同一个红包只把窗口拉到前面，不重复开窗',
+            cardWindows.length === 1
+            && windowUpdates.some((item) => item.id === opened.id && item.focused === true),
+            JSON.stringify(windowUpdates));
 
-          // 已完结的条目：卡片是只读的，直接摊开结果、进度与领取记录。
+          // 换个红包：把开着的详情窗口关掉、按新卡片的尺寸重开一个，不留下第二个窗口。
           state.entries.push({
             id: 'done-1',
             code: '11775521',
@@ -348,50 +386,22 @@
           });
           notify();
           await tick();
-          const view = row('done-1').querySelector('button[data-action="open"]');
-          if (view) click(view);
+          if (openButton('done-1')) click(openButton('done-1'));
           await tick();
           await tick();
-          check('历史卡片直接展开结果视图',
-            Boolean(inCard('#envelope-opened-view')) && inCard('#envelope-opened-view').style.display === 'flex');
-          check('历史卡片显示领取金额',
-            String((inCard('#env-claimed-amount') || {}).textContent || '').startsWith('1.23'),
-            inCard('#env-claimed-amount') && inCard('#env-claimed-amount').textContent);
-          check('历史卡片渲染领取记录',
-            Boolean(inCard('#env-claims-list')) && inCard('#env-claims-list').querySelectorAll('.envelope-claim-row').length === 1);
-          check('历史卡片收起封口视图',
-            Boolean(inCard('#envelope-closed-view')) && inCard('#envelope-closed-view').style.display === 'none');
-          check('卡片只有一层外壳',
-            Boolean(card()) && card().querySelectorAll('.redpacket-envelope').length === 0
-            && Boolean(card().parentElement) && card().parentElement.classList.contains('modal-overlay'));
-          // 原尺寸＝原站 320×520 再乘 1.2 倍缩放：宽度恒为 384（窗口够宽时），
-          // 高度是 min(624, 视口高 - 上下留白 44)，所以按视口推算期望值，换窗口大小也不误报。
-          const cardBox = card() ? card().getBoundingClientRect() : { width: 0, height: 0 };
-          const cardW = Math.round(cardBox.width);
-          const cardH = Math.round(cardBox.height);
-          const wantW = window.innerWidth >= 440 ? 384 : Math.round((window.innerWidth - 40) / 1.2 * 1.2);
-          const wantH = Math.min(624, Math.round(window.innerHeight - 44));
-          check('卡片保持原尺寸（原站 320×520 乘 1.2 倍）',
-            Math.abs(cardW - wantW) <= 1 && Math.abs(cardH - wantH) <= 1,
-            cardW + '×' + cardH + '，期望 ' + wantW + '×' + wantH + ' @ ' + window.innerWidth + '×' + window.innerHeight);
-          // 卡片开着时面板才给卡片让位（弹出面板据此把窗口撑到浏览器上限），
-          // 平时按内容量高低，下面不留空底。
-          check('卡片打开时面板给卡片让位', document.body.classList.contains('hb-card-open'));
-          // 回归：宿主是固定定位、盖住整个面板的元素，关掉卡片后必须彻底让路，
-          // 否则面板会被一层透明宿主吞掉点击（表现为「关掉红包后面板点不动」）。
-          globalThis.HBEnvelope.close();
-          await tick();
-          const probe = centerProbe(document.getElementById('hb-input'));
-          check('关掉卡片后面板恢复可点击',
-            Boolean(probe) && document.getElementById('app').contains(probe),
-            probe ? (probe.id || probe.className || probe.tagName) : 'null');
-          check('关掉卡片后宿主不留在 DOM 里', document.getElementById('hb-envelope-host') === null);
-          check('关掉卡片后收回让位标记', document.body.classList.contains('hb-card-open') === false);
+          check('换个红包时关掉旧窗口重开一个',
+            windowRemovals.includes(opened.id)
+            && cardWindows.length === 1
+            && cardWindows[0].url === 'chrome-extension://harness/card.html?id=done-1',
+            JSON.stringify(cardWindows));
+          check('换过之后仍然只有一个详情窗口', cardWindows.length === 1, String(cardWindows.length));
           check('已完结行只给删除动作',
             Boolean(row('done-1').querySelector('button[data-action="delete"]'))
             && !row('done-1').querySelector('button[data-action="void"]'));
 
-          // 抽奖红包：没报名时给「参与抽选」，报名之后只剩等待开奖。
+          // 抽奖红包：先让详情窗口"被用户关掉"（替身里查不到这个窗口了），验证面板会重新开一个，
+          // 且尺寸按抽奖卡算。卡片本身的渲染在 card-harness.html 里验。
+          cardWindows.length = 0;
           const lotteryRow = {
             id: 'lottery-1',
             code: '11775521',
@@ -408,18 +418,13 @@
           state.entries.push(lotteryRow);
           notify();
           await tick();
-          if (row('lottery-1').querySelector('button[data-action="open"]')) {
-            click(row('lottery-1').querySelector('button[data-action="open"]'));
-          }
+          if (openButton('lottery-1')) click(openButton('lottery-1'));
           await tick();
           await tick();
-          check('抽奖卡片显示倒计时',
-            /秒$/.test(String((inCard('#lottery-countdown') || {}).textContent || '')),
-            inCard('#lottery-countdown') && inCard('#lottery-countdown').textContent);
-          check('抽奖卡片列出参与者',
-            Boolean(inCard('#lottery-participants')) && inCard('#lottery-participants').textContent.includes('bob'));
-          check('未报名时给出参与按钮',
-            Boolean(inCard('#lottery-join')) && inCard('#lottery-join').hidden === false);
+          check('窗口关掉后再点开会重新开一个', cardWindows.length === 1, String(cardWindows.length));
+          check('抽奖红包按抽奖卡开窗（544×812 视口加外框估量）',
+            Boolean(cardWindows[0]) && cardWindows[0].width === 560 && cardWindows[0].height === 852,
+            cardWindows[0] && (cardWindows[0].width + '×' + cardWindows[0].height));
 
           lotteryRow.packet = { id: 'hp2', type: 'lottery', joined: true, code: '11775521', creator: { username: 'alice', linuxdo_id: 1 } };
           lotteryRow.lines = [{ text: '已参与抽选，等待开奖', tone: 'success' }];
@@ -434,8 +439,10 @@
           }
           await tick();
           await tick();
-          check('已报名的抽奖卡片不再给参与按钮',
-            Boolean(inCard('#lottery-join')) && inCard('#lottery-join').hidden === true);
+          check('已报名的抽奖行再点开只是把同一个窗口拉到前面',
+            cardWindows.length === 1
+            && windowUpdates.some((item) => item.id === cardWindows[0].id && item.focused === true),
+            JSON.stringify(windowUpdates));
           check('报名之后行上不再给写入动作',
             document.querySelectorAll('#hb-list button[data-action="claim"]').length === 0);
 

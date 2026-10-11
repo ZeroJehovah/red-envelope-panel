@@ -5,3 +5,4 @@ node_modules/
 .vscode/
 *.zip
 __pycache__/
+_metadata/

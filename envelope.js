@@ -6,13 +6,15 @@
  * 领取进度、已领总额与领取记录；抽奖卡片展示倒计时、参与者与中奖公示。
  *
  * 与脚本版的形态差异（记录在 docs/AGENTS.md）：
- *   - 卡片挂在面板页面自己的影子 DOM 里（样式随包的 envelope.css），不再挂在网页上；
+ *   - 卡片挂在红包详情窗口自己的影子 DOM 里（样式随包的 envelope.css）：既不挂在网页上，
+ *     也不在面板页面里——弹出面板受浏览器弹窗高度上限（600px）限制，卡片按原尺寸放不下，
+ *     从 v0.9.7 起由面板另开一个独立小窗口来放卡片；
  *   - 一次只展示一张卡片，没有脚本版的多卡堆叠与「全部关闭」；
  *   - 关闭卡片不会把条目改写成「未领取」：面板里条目留在「待开启」，可以再次打开；
  *   - 头像只在 hb.unsnow.org 同源时联网加载，其余情况用原站的确定性 SVG，
  *     保持「面板唯一的网络目标」。
  *
- * 写操作仍然只认真实点击：卡片上的「开」/「参与抽选」由面板转成一次 hb:claim，
+ * 写操作仍然只认真实点击：卡片上的「开」/「参与抽选」转成一次 hb:claim，
  * 后台还会再校验条目状态，一次点击只放行一条请求。
  */
 'use strict';
@@ -21,10 +23,22 @@
   const P = globalThis.HBProtocol;
   const HOST_ID = 'hb-envelope-host';
   const STYLE_HREF = 'envelope.css';
-  // 卡片开着时给 body 打个标：弹出面板据此把窗口撑到浏览器上限，卡片才能按原尺寸铺开；
-  // 卡片一关就撤掉，面板收回内容高度（侧边栏外壳不看这个类）。
-  const CARD_OPEN_CLASS = 'hb-card-open';
   const POLL_INTERVAL_MS = 4000;   // 卡片开着时的刷新节奏；后台限速会让它不会更密
+
+  // 卡片尺寸（原站设定：普通红包 320×520、抽奖卡 420×640，再乘 --envelope-zoom）。
+  // 红包详情窗口按这个尺寸开窗，卡片才不会被 height: min() 压扁；外层留白照
+  // envelope.css 的 .modal-overlay（左右 padding 各 20，上下 --edge-top 20 / --edge-bottom 24）。
+  const CARD_BASE = {
+    random: { width: 320, height: 520 },
+    lottery: { width: 420, height: 640 },
+  };
+  const CARD_ZOOM = 1.2;         // 与 envelope.css 的 --envelope-zoom 同一个值
+  const CARD_INSET_X = 40;       // .modal-overlay 左右各 20px
+  const CARD_INSET_Y = 44;       // --edge-top 20 + --edge-bottom 24
+  // 窗口外框比视口多出来的那部分（标题栏与边框）：开窗时先按它估外框尺寸，
+  // 详情窗口起来后再用真实差值收紧一次（windows.create 的宽高是外框，不是视口）。
+  const FRAME_ESTIMATE_X = 16;
+  const FRAME_ESTIMATE_Y = 40;
 
   // 这里只放卡片「里面」的两块视图：卡片本体由 createNode 建出来，class 已经在了，
   // 若这里再套一层 .redpacket-envelope，卡片的 padding、圆角与 520px 定高会叠两遍。
@@ -231,7 +245,9 @@
     return node;
   }
 
-  function closeCard() {
+  // replaced：这次关闭是因为马上要换一张卡片（show() 会先收起上一张），不是用户关掉的，
+  // 调用方的 onClose 就不该被触发——红包详情窗口正是靠 onClose 关窗口。
+  function closeCard(replaced) {
     const current = card;
     if (!current) return;
     card = null;
@@ -240,13 +256,13 @@
     stopPolling(current);
     current.node.remove();
     if (overlay) overlay.classList.remove('active');
-    // 宿主是固定定位、盖住整个面板的层：关掉卡片后必须连它一起撤掉，
-    // 否则留一层透明宿主在 DOM 里，面板的点击会被它整个吞掉（打开下一张卡片时重建）。
+    // 宿主是固定定位、盖住整个页面的层：关掉卡片后必须连它一起撤掉，
+    // 否则留一层透明宿主在 DOM 里，页面上的点击会被它整个吞掉（打开下一张卡片时重建）。
     if (host) host.remove();
     host = null;
     overlay = null;
     shadowRoot = null;
-    document.body.classList.remove(CARD_OPEN_CLASS);
+    if (replaced === true) return;
     if (typeof current.onClose === 'function') {
       try {
         current.onClose();
@@ -604,8 +620,24 @@
 
   /* ---------------------------------- 入口 ---------------------------------- */
 
+  // 红包详情窗口要多大的视口（内尺寸），以及开窗时先按多大外框去要。
+  // 卡片的宽度是 min(320px/420px, 100%)，高度是 min(520px/640px, 视口高换算)，所以窗口
+  // 只要给足「卡片显示尺寸 + 遮罩留白」，卡片就是原尺寸，不会被压扁。
+  function windowSize(packet) {
+    const base = P.isLottery(packet) ? CARD_BASE.lottery : CARD_BASE.random;
+    return {
+      width: Math.round(base.width * CARD_ZOOM) + CARD_INSET_X,
+      height: Math.round(base.height * CARD_ZOOM) + CARD_INSET_Y,
+    };
+  }
+
+  function windowOuterSize(packet) {
+    const size = windowSize(packet);
+    return { width: size.width + FRAME_ESTIMATE_X, height: size.height + FRAME_ESTIMATE_Y };
+  }
+
   function show(options = {}) {
-    closeCard();
+    closeCard(true);
     const packet = options.packet;
     if (!packet || !packet.id) return null;
     ensureOverlay();
@@ -630,7 +662,6 @@
     };
     overlay.append(node);
     overlay.classList.add('active');
-    document.body.classList.add(CARD_OPEN_CLASS);
     card = state;
 
     node.addEventListener('click', (event) => {
@@ -683,7 +714,7 @@
     };
   }
 
-  globalThis.HBEnvelope = { show, close: closeCard, hostId: HOST_ID };
+  globalThis.HBEnvelope = { show, close: closeCard, hostId: HOST_ID, windowSize, windowOuterSize };
 
   // 面板一加载就把样式读好，用户点开卡片时就是同步挂载，不会先亮后暗。
   loadStyles();

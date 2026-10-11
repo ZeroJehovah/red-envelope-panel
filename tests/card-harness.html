@@ -1,0 +1,249 @@
+<!doctype html>
+<!-- 红包详情窗口的 DOM 自检页（开发期用，不随扩展发布）。
+
+     用法：把本文件连同 card.js / card.css / envelope.js / envelope.css / hb-protocol.js /
+     browser-shim.js 复制到扩展产物目录（与 manifest.json 同级），再用 Chrome 打开并带上红包条目
+     id；自检跑完把结果写进 #harness-result，标题变为 HARNESS-PASS / HARNESS-FAIL。
+
+       card-harness.html?id=hp1        待开启的普通红包（可领）
+       card-harness.html?id=hp2        抽奖红包（未报名）
+       card-harness.html?id=hp3        已领取完的历史红包
+       card-harness.html?id=missing    条目不在时的兜底说明
+
+     无头运行示例（窗口至少 424×668，卡片才铺到原尺寸 384×624）：
+       chrome.exe --headless=new --disable-gpu --virtual-time-budget=8000 \
+         --window-size=560,900 \
+         --user-data-dir="D:\Green Files\ChromeForTestingProfiles\card-harness" \
+         --dump-dom "file:///D:/Green%20Files/chrome%20plugins/red-envelope-panel/card-harness.html?id=hp1"
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>card harness</title>
+    <link rel="stylesheet" href="card.css" />
+  </head>
+  <body>
+    <main id="hb-card-error" hidden></main>
+    <pre id="harness-result">running</pre>
+    <script>
+      const entryId = new URLSearchParams(location.search).get('id') || '';
+      const sent = [];
+      const listeners = [];
+      const windowUpdates = [];
+      const sessionBag = {};
+      let closeCalls = 0;
+      window.close = () => { closeCalls += 1; };
+      // headless 里 screen 默认只有 800×600，比卡片还小，card.js 会按约定跳过「按卡片收紧」；
+      // 这里把屏幕报大一点，好把那段逻辑本身也验到（改不动就按真实屏幕断言，两种结果都算过）。
+      try {
+        Object.defineProperty(screen, 'availWidth', { value: 1920, configurable: true });
+        Object.defineProperty(screen, 'availHeight', { value: 1080, configurable: true });
+      } catch {
+        // 改不动就按真实屏幕断言。
+      }
+      // 详情窗口要的原始红包：替身按 id 回放，字段与站点返回的形状一致。
+      const packetDetails = {
+        hp1: {
+          id: 'hp1', type: 'random', status: 'active', code: '11775521', wish: '恭喜发财，大吉大利',
+          creator: { username: 'alice', linuxdo_id: 1 }, count: 5, claimed_count: 2, claimed_amount: 1.23,
+          claims: [{ share_id: 7, username: 'carol', amount: 1.23, at: 2 }],
+        },
+        hp2: {
+          id: 'hp2', type: 'lottery', status: 'active', distribution_type: 'random', code: '11775521',
+          wish: '拼手气抽奖', creator: { username: 'alice', linuxdo_id: 1 }, total_amount: 20, count: 3,
+          draw_at: Date.now() + 60000, server_now: Date.now(),
+          participants: [{ username: 'bob', name: 'bob', linuxdo_id: 9 }], winners: [],
+        },
+        hp3: {
+          id: 'hp3', type: 'random', status: 'exhausted', code: '11775521', wish: '恭喜发财，大吉大利',
+          creator: { username: 'alice', linuxdo_id: 1 }, count: 5, claimed_count: 2, claimed_amount: 1.23,
+          mine: 1.23, claims: [{ share_id: 7, username: 'carol', amount: 1.23, at: 2 }],
+        },
+      };
+      const state = {
+        entries: [
+          {
+            id: 'hp1', code: '11775521', charset: 'numeric', claimMode: 'manual', status: 'awaiting',
+            result: '等待手动开启', lines: [{ text: '等待手动开启', tone: 'muted' }],
+            packet: { id: 'hp1', type: 'random', status: 'active', code: '11775521', creator: { username: 'alice', linuxdo_id: 1 } },
+            packetId: 'hp1', matched: true, createdAt: 1,
+          },
+          {
+            id: 'hp2', code: '11775521', charset: 'numeric', claimMode: 'manual', status: 'awaiting',
+            result: '等待手动参与抽选', lines: [{ text: '等待手动参与抽选', tone: 'muted' }],
+            packet: { id: 'hp2', type: 'lottery', joined: false, code: '11775521', creator: { username: 'alice', linuxdo_id: 1 } },
+            packetId: 'hp2', matched: true, createdAt: 2,
+          },
+          {
+            id: 'hp3', code: '11775521', charset: 'numeric', claimMode: 'manual', status: 'done',
+            result: '领取成功: +1.23 LDC', lines: [{ text: '领取成功: +1.23 LDC', tone: 'success' }],
+            packet: { id: 'hp3', type: 'random', status: 'exhausted', code: '11775521', mine: 1.23, creator: { username: 'alice', linuxdo_id: 1 } },
+            packetId: 'hp3', matched: true, createdAt: 3,
+          },
+        ],
+        settings: { charset: 'text', batch: false, claimMode: 'manual', gapExtraMs: 0, display: 'panel' },
+      };
+      globalThis.chrome = {
+        runtime: {
+          getManifest: () => ({ version: 'harness' }),
+          getURL: (path) => new URL(path, location.href).href,
+          sendMessage: async (message) => {
+            sent.push(message);
+            if (message.type === 'hb:state:get') return { ok: true, state };
+            if (message.type === 'hb:packet') return { ok: true, packet: packetDetails[message.id] || null };
+            if (message.type === 'hb:session') return { ok: true, loggedIn: true, username: 'harness', linuxdo_id: 9 };
+            if (message.type === 'hb:claim') {
+              return {
+                ok: true,
+                state,
+                outcome: { lines: [{ text: '领取成功: +1.23 LDC', tone: 'success' }], amount: 1.23 },
+                packet: packetDetails[entryId] || null,
+              };
+            }
+            return { ok: false, error: '未知消息：' + String(message.type) };
+          },
+        },
+        storage: {
+          onChanged: { addListener: (listener) => listeners.push(listener) },
+          session: {
+            get: async (key) => (key in sessionBag ? { [key]: sessionBag[key] } : {}),
+            set: async (items) => { Object.assign(sessionBag, items); },
+            remove: async (key) => { delete sessionBag[key]; },
+          },
+        },
+        windows: {
+          getCurrent: async () => ({ id: 7 }),
+          update: async (id, props) => { windowUpdates.push({ id, ...props }); return { id }; },
+        },
+      };
+    </script>
+    <script src="browser-shim.js"></script>
+    <script src="hb-protocol.js"></script>
+    <script src="envelope.js"></script>
+    <script src="card.js"></script>
+    <script>
+      (async () => {
+        const passed = [];
+        const failed = [];
+        const check = (name, ok, detail) => {
+          (ok ? passed : failed).push((ok ? 'PASS ' : 'FAIL ') + name + (detail ? ' → ' + detail : ''));
+        };
+        const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+        const host = () => document.getElementById('hb-envelope-host');
+        const card = () => host() && host().shadowRoot && host().shadowRoot.querySelector('.redpacket-envelope');
+        const inCard = (selector) => (card() ? card().querySelector(selector) : null);
+        const click = (node) => node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        const lottery = entryId === 'hp2';
+        const claims = (type) => sent.filter((message) => message.type === type);
+
+        try {
+          for (let index = 0; index < 6; index += 1) await tick();
+          // 自检页是 file://，拿不到可 fetch 的同包样式，走 <link> 兜底：样式到位前卡片先藏着，
+          // 400ms 后再放开。多等一会儿再断言「已经看得见」。
+          await new Promise((resolve) => setTimeout(resolve, 600));
+
+          if (entryId === 'missing') {
+            const box = document.getElementById('hb-card-error');
+            check('条目不在时给出兜底说明',
+              box.hidden === false && /没有红包详情/.test(box.textContent), box.textContent);
+            check('条目不在时不挂卡片', host() === null);
+          } else {
+            const record = sessionBag['hb-card-window'];
+            check('窗口登记自己的窗口号与红包 id',
+              Boolean(record) && record.windowId === 7 && record.entryId === entryId, JSON.stringify(record));
+            // 窗口按卡片收紧（视口至少要放得下卡片与遮罩留白）：普通 424×668，抽奖 544×812。
+            // 屏幕装不下时不收紧（保持面板要的外框尺寸），这两种结果都算过。
+            const want = lottery ? [544, 812] : [424, 668];
+            const fit = windowUpdates[windowUpdates.length - 1];
+            const fitsScreen = want[0] <= screen.availWidth && want[1] <= screen.availHeight;
+            // 要的是外框尺寸 = 想要的视口 + 浏览器自己的标题栏/边框（out - in），所以只验下界，
+            // 上界留出这段框架差（无头里 outer - inner 就有 87px）。
+            const frameAllowance = 160;
+            check('窗口按卡片尺寸收紧',
+              fitsScreen
+                ? Boolean(fit) && fit.id === 7
+                  && fit.width >= want[0] && fit.width <= want[0] + frameAllowance
+                  && fit.height >= want[1] && fit.height <= want[1] + frameAllowance
+                : windowUpdates.length === 0,
+              (fit ? (fit.width + '×' + fit.height) : '未收紧') + '，期望 ≥ ' + want.join('×')
+              + '，屏幕 ' + screen.availWidth + '×' + screen.availHeight);
+            check('卡片挂在影子宿主里', Boolean(card()));
+            check('卡片样式到位后才显示',
+              Boolean(host()) && host().style.visibility !== 'hidden',
+              host() ? (host().style.visibility || '(可见)') : 'null');
+            // 原尺寸＝原站 320×520（抽奖卡 420×640）再乘 1.2 倍缩放，窗口不够时才按视口收住。
+            const box = card() ? card().getBoundingClientRect() : { width: 0, height: 0 };
+            const wantW = Math.min(lottery ? 504 : 384, Math.round(window.innerWidth - 40));
+            const wantH = Math.min(lottery ? 768 : 624, Math.round(window.innerHeight - 44));
+            check('卡片保持原尺寸（原站尺寸乘 1.2 倍）',
+              Math.abs(Math.round(box.width) - wantW) <= 1 && Math.abs(Math.round(box.height) - wantH) <= 1,
+              Math.round(box.width) + '×' + Math.round(box.height) + '，期望 ' + wantW + '×' + wantH
+              + ' @ ' + window.innerWidth + '×' + window.innerHeight);
+            check('卡片只有一层外壳',
+              Boolean(card()) && card().querySelectorAll('.redpacket-envelope').length === 0
+              && Boolean(card().parentElement) && card().parentElement.classList.contains('modal-overlay'));
+
+            if (entryId === 'hp1') {
+              check('待开启的红包显示发件人与口令',
+                inCard('#env-sender-name') && inCard('#env-sender-name').textContent === '来自 alice 的红包'
+                && inCard('#env-footer-code') && inCard('#env-footer-code').textContent === '11775521',
+                inCard('#env-footer-code') && inCard('#env-footer-code').textContent);
+              check('头像用随包的兜底 SVG',
+                String((inCard('#env-creator-avatar') || {}).src || '').startsWith('data:image/svg+xml'));
+              check('给出开启按钮', Boolean(inCard('#btn-open-packet')));
+              if (inCard('#btn-open-packet')) click(inCard('#btn-open-packet'));
+              await tick();
+              check('合成点击不授权领取（isTrusted 校验）',
+                claims('hb:claim').length === 0, JSON.stringify(claims('hb:claim')));
+            }
+
+            if (lottery) {
+              check('抽奖卡片显示倒计时',
+                /秒$/.test(String((inCard('#lottery-countdown') || {}).textContent || '')),
+                inCard('#lottery-countdown') && inCard('#lottery-countdown').textContent);
+              check('抽奖卡片列出参与者',
+                Boolean(inCard('#lottery-participants')) && inCard('#lottery-participants').textContent.includes('bob'));
+              check('未报名时给出参与按钮',
+                Boolean(inCard('#lottery-join')) && inCard('#lottery-join').hidden === false);
+              if (inCard('#lottery-join')) click(inCard('#lottery-join'));
+              await tick();
+              check('合成点击不授权报名（isTrusted 校验）',
+                claims('hb:claim').length === 0, JSON.stringify(claims('hb:claim')));
+            }
+
+            if (entryId === 'hp3') {
+              check('已领取的历史红包直接展开结果视图',
+                Boolean(inCard('#envelope-opened-view')) && inCard('#envelope-opened-view').style.display === 'flex');
+              check('显示领取金额',
+                String((inCard('#env-claimed-amount') || {}).textContent || '').startsWith('1.23'),
+                inCard('#env-claimed-amount') && inCard('#env-claimed-amount').textContent);
+              check('渲染领取记录',
+                Boolean(inCard('#env-claims-list'))
+                && inCard('#env-claims-list').querySelectorAll('.envelope-claim-row').length === 1);
+              check('收起封口视图',
+                Boolean(inCard('#envelope-closed-view')) && inCard('#envelope-closed-view').style.display === 'none');
+            }
+
+            // 关掉卡片就等于关窗口：宿主也不能留在 DOM 里（它是盖住整页的一层）。
+            if (inCard('.envelope-close-btn')) click(inCard('.envelope-close-btn'));
+            else globalThis.HBEnvelope.close();
+            await tick();
+            check('关掉卡片会关掉窗口', closeCalls === 1, String(closeCalls));
+            check('关掉卡片后宿主不留在 DOM 里', host() === null);
+            window.dispatchEvent(new Event('pagehide'));
+            await tick();
+            await tick();
+            check('窗口关掉后清掉会话存储里的窗口号',
+              sessionBag['hb-card-window'] === undefined, JSON.stringify(sessionBag));
+          }
+        } catch (error) {
+          failed.push('FAIL 抛出异常 → ' + String(error && error.stack || error));
+        }
+
+        document.getElementById('harness-result').textContent =
+          'PASS ' + passed.length + ' / FAIL ' + failed.length + '\n' + passed.concat(failed).join('\n');
+        document.title = failed.length ? 'HARNESS-FAIL' : 'HARNESS-PASS';
+      })();
+    </script>
+  </body>
+</html>

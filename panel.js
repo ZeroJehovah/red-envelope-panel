@@ -20,7 +20,8 @@
   const P = globalThis.HBProtocol;
   // 口令清洗与校验规则在 code-rules.js，与脚本版逐字符一致。
   const codes = globalThis.HBCodes;
-  // 红包详情卡片（envelope.js + envelope.css）：挂在面板自己的影子 DOM 里，一次一张。
+  // 红包详情卡片在独立的详情窗口里渲染（card.html + card.js）；面板这边只借 envelope.js
+  // 算卡片的窗口尺寸（HBEnvelope.windowSize），自己不画卡片。
   const envelope = globalThis.HBEnvelope;
   const VERSION = api.runtime.getManifest().version;
   const STATE_KEY = 'hb-state-v1';
@@ -135,7 +136,6 @@
   // 最近一次渲染的完整状态，供「打开卡片」按 id 找条目、以及渲染相对时间；
   // 配置面板的展开状态只活在本次会话。
   let lastState = null;
-  let openEnvelopeId = null;
   let configOpen = false;
 
   // 面板里没有全局提示区（脚本版侧边栏也没有）：领取/参与/查询的结果都写在历史行里，
@@ -533,58 +533,66 @@
     syncDraft();
   }
 
-  /* ------------------------------ 红包详情卡片 ------------------------------ */
+  /* ------------------------------ 红包详情窗口 ------------------------------ */
 
-  async function readPacket(packetId, network) {
+  const CARD_PAGE = 'card.html';
+  // 详情窗口的窗口号记在会话存储里（storage.session 只活在这一次浏览器会话，重启即清），
+  // 面板据此复用同一个窗口，不让人点几次就开出一堆窗口来。
+  const CARD_WINDOW_KEY = 'hb-card-window';
+
+  async function cardWindowRecord() {
     try {
-      const response = await api.runtime.sendMessage({ type: 'hb:packet', id: packetId, refresh: network === true });
-      return response?.ok ? response.packet : null;
+      const bag = await api.storage.session.get(CARD_WINDOW_KEY);
+      const record = bag?.[CARD_WINDOW_KEY];
+      return record?.windowId ? record : null;
     } catch {
       return null;
     }
   }
 
-  // 打开红包详情卡片：先用历史里那份快照立即出卡片，再把手上的只读请求结果补进去。
-  // 卡片上的「开」/「参与抽选」是唯一的写入入口，由 envelope.js 校验真实点击。
-  async function openEnvelope(id) {
+  // 上一次开着的详情窗口还活着吗（被关掉后 windows.get 会失败，返回 null）。
+  async function liveCardWindow(record) {
+    if (!record) return null;
+    try {
+      return await api.windows.get(record.windowId);
+    } catch {
+      return null;
+    }
+  }
+
+  // 打开红包详情：卡片在独立窗口里渲染——弹出面板受浏览器弹窗高度上限（600px）限制，
+  // 卡片按原尺寸（384×624、抽奖 504×768）会被压扁。同时只留一个详情窗口：同一个红包就把它
+  // 拉到前面，别的红包就把旧窗口关掉、按新卡片的尺寸重开一个（点几次都只有一个窗口）。
+  async function openEnvelopeWindow(id) {
     const entry = (lastState?.entries || []).find((item) => item.id === id);
     if (!entry?.packet?.id) {
       warn('这条记录没有红包详情可看：' + id);
       return;
     }
-    if (!envelope) {
-      warn('红包卡片脚本未加载，请重新打开面板。');
+    if (!envelope || !api.windows?.create) {
+      warn('当前浏览器打不开红包详情窗口，请重新打开面板。');
       return;
     }
-    const packetId = entry.packet.id;
-    const claimable = entry.status === 'awaiting' && entry.claimMode === 'manual';
-    const handle = envelope.show({
-      entry,
-      packet: entry.packet,
-      viewOnly: !claimable,
-      onWrite: () => send({ type: 'hb:claim', id, trusted: true }),
-      onRefresh: (network) => readPacket(packetId, network),
-      // 打开新卡片会先关掉上一张，所以关卡片只清掉属于它的那次记录。
-      onClose: () => { if (openEnvelopeId === id) openEnvelopeId = null; },
-    });
-    if (!handle) {
-      openEnvelopeId = null;
-      warn('红包卡片打开失败：' + id);
+    const url = api.runtime.getURL(CARD_PAGE) + '?id=' + encodeURIComponent(id);
+    const record = await cardWindowRecord();
+    const existing = await liveCardWindow(record);
+    if (existing && record.entryId === id) {
+      // 窗口里就是这张卡片（同一个红包又点了一次）：拉到前面就行。
+      await api.windows.update(existing.id, { focused: true }).catch(() => {});
       return;
     }
-    openEnvelopeId = id;
-    const [fresh, session] = await Promise.all([
-      readPacket(packetId, true),
-      api.runtime.sendMessage({ type: 'hb:session' }).catch(() => null),
-    ]);
-    // 读取期间卡片可能已被关掉或换成别的条目，这时不要再往卡片里写东西。
-    if (openEnvelopeId !== id) return;
-    const user = session?.ok && session.loggedIn
-      ? { username: session.username, linuxdo_id: session.linuxdo_id ?? null }
-      : null;
-    handle.update({ packet: fresh || undefined, user });
-    // 读不到最新详情时卡片显示的是历史里的快照，这与脚本版一致，不再另写提示。
-    if (!fresh) warn('暂时读不到红包 ' + packetId + ' 的最新详情，显示本地记录。');
+    if (existing) {
+      // 换个红包：把旧窗口关掉，下面按新卡片的尺寸重开一个。这里不去用 tabs.update 改已有
+      // 窗口的地址——扩展页能不能被这样导航要看浏览器对扩展源给不给权限，关掉重开是同一件事，
+      // 而且不会出现「窗口开着、里面还是上一个红包」的将就状态。
+      await api.windows.remove(existing.id).catch(() => {});
+    }
+    const size = envelope.windowOuterSize(entry.packet);
+    try {
+      await api.windows.create({ url, type: 'popup', focused: true, width: size.width, height: size.height });
+    } catch (error) {
+      warn('打开红包详情窗口失败', error);
+    }
   }
 
   /* -------------------------------- 侧边栏 --------------------------------- */
@@ -721,9 +729,9 @@
         return;
       }
       button.disabled = true;
-      // 打开详情卡片只是只读操作；真正的领取/参与在卡片里由真实点击触发。
+      // 开详情窗口只是把窗口叫起来；真正的领取/参与在卡片里由真实点击触发。
       if (action === 'open') {
-        openEnvelope(id).finally(() => { button.disabled = false; });
+        openEnvelopeWindow(id).finally(() => { button.disabled = false; });
         return;
       }
       const message = action === 'void' ? { type: 'hb:void', id } : { type: 'hb:delete', id };
@@ -784,12 +792,6 @@
     renderConfig(state);
     renderPaused(state);
     renderHistory(state);
-    // 条目在别处被删除或清空时，把它的详情卡片一起收起来。
-    const entries = Array.isArray(state.entries) ? state.entries : [];
-    if (openEnvelopeId && !entries.some((entry) => entry.id === openEnvelopeId)) {
-      openEnvelopeId = null;
-      envelope?.close();
-    }
   }
 
   globalThis.HBPanel = { mount };

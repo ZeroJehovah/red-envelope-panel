@@ -4,7 +4,7 @@
 
 本目录是浏览器扩展源码，公开仓库。只放代码、图标与公开说明，不放账号、Cookie、令牌、密钥、真实领取记录或内部抓包记录。
 
-扩展定位在**浏览器层**：面板与浏览的网站无关，不在页面里注入 UI，也不申请浏览站点的访问权限；可选的站点内嵌模式已评估并放弃（v0.9.6），不要自行把站点权限或内容脚本引回来。
+扩展定位在**浏览器层**：面板与浏览的网站无关，不在页面里注入 UI，也不申请浏览站点的访问权限；可选的站点内嵌模式已评估并放弃（v0.9.6），不要自行把站点权限或内容脚本引回来。红包详情卡片同样不挤进面板，由面板另开一个扩展自己的小窗口来放（v0.9.7）——弹出面板受浏览器弹窗高度上限（600px）限制，原尺寸卡片铺不下。
 
 ## 结构
 
@@ -18,13 +18,15 @@ src/
 ├── background.js      # service worker：状态持有者、消息路由、请求代理、限速与队列
 ├── panel.js           # 弹出面板与侧边栏共用渲染器：按脚本版 ensurePanel() 复刻的头部开关、配置面板、输入区与历史区（HBPanel.mount）
 ├── panel.css          # 面板共用样式（莫兰迪配色）
-├── envelope.js        # 面板内红包详情卡片（信封弹窗、领取记录、抽奖倒计时与名单，暴露 globalThis.HBEnvelope）
-├── envelope.css       # 卡片样式（挂进 #hb-envelope-host 的 shadow root，卡片内部沿用站点红/金配色，按面板可用尺寸铺满）
+├── envelope.js        # 红包详情卡片（信封弹窗、领取记录、抽奖倒计时与名单，暴露 globalThis.HBEnvelope）；卡片画在详情窗口里，面板只借它算开窗尺寸
+├── envelope.css       # 卡片样式（挂进卡片宿主的 shadow root，卡片内部沿用站点红/金配色，按窗口尺寸铺满）
+├── card.html/.js      # 红包详情窗口的外壳：窗口里只放一张卡片，按 URL 上的红包 id 渲染
+├── card.css           # 详情窗口页面这一层的外框样式（暗底；卡片样式仍由 envelope.css 提供）
 ├── popup.html/.js     # 点图标弹出面板的外壳
 ├── sidepanel.html/.js # 常显侧边栏的外壳
 ├── icons/             # 16/32/48/128 PNG（由 tools/make-icons.py 生成）
 ├── tools/             # 开发期脚本，不随扩展逻辑运行
-└── tests/             # node:test 自检（清单、口令规则、后台集成）与面板 DOM 自检页（panel-harness.html）
+└── tests/             # node:test 自检（清单、口令规则、后台集成）与两个 DOM 自检页（panel-harness.html、card-harness.html）
 ```
 
 ## 硬性约束
@@ -35,7 +37,8 @@ src/
 - **协议层**：端点、错误文案与结果行集中在 `hb-protocol.js`（暴露 `globalThis.HBProtocol`），后台与 `node --test` 共用；文案按脚本版移植，改文案只改这一处。
 - **网络**：只允许访问 `https://hb.unsnow.org`；跨域请求只能由后台 service worker 发起（`credentials: 'include'` 携带会话 Cookie，15 秒超时），扩展页面不得直接请求。
 - **面板结构**：`panel.js` / `panel.css` 按脚本版 `ensurePanel()` 1:1 复刻（头部两个开关与三个图标按钮、可折叠的配置面板、输入区与「拆红包」＋字数提示、暂停横幅与「恢复执行」、历史头与逐行动作、点击历史口令填入输入框）。「悬浮/停靠」分别映射到点图标弹出的面板与浏览器常显侧边栏，窗口的位置与尺寸交给浏览器，不要重新引入脚本版的拖拽与八向缩放手柄。
-- **详情卡片**：红包详情（金额、领取进度与记录、抽奖倒计时与名单）由 `envelope.js` 挂在面板页面内的 shadow DOM 宿主 `#hb-envelope-host` 上，一次只显示一张卡片；不向浏览的网页注入任何 DOM 或样式。卡片头像只从 `hb.unsnow.org` 来源加载，其他一律回落到内联 SVG data URI。卡片保持**原尺寸**（原站 320×520、抽奖卡 420×640，再乘原站 1.2 倍缩放），窗口不够大就加大窗口而不是缩卡片：`--envelope-zoom` 恒为 1.2，不要引入原站那条窄屏/矮屏的 0.8 倍降级。卡片本体只有一层：`createNode()` 已经建出 `.redpacket-envelope`，markup 里不得再套同名 class。宿主是固定定位、盖住整个面板的一层，**关闭卡片时必须连宿主一起撤掉**（`host.remove()`）并让 `:host` 在无卡片时 `pointer-events: none`，否则留下一层透明宿主会把面板的点击整个吞掉。
+- **详情卡片**：红包详情（金额、领取进度与记录、抽奖倒计时与名单）由 `envelope.js` 挂在**详情窗口**（`card.html` + `card.js`）自己的 shadow DOM 宿主 `#hb-envelope-host` 上，一次只显示一张卡片；不在网页里，也不在面板页面里——弹出面板受浏览器弹窗高度上限（600px）限制，卡片按原尺寸（普通 384×624、抽奖 504×768）会被 `height: min()` 压扁。不向浏览的网页注入任何 DOM 或样式。卡片头像只从 `hb.unsnow.org` 来源加载，其他一律回落到内联 SVG data URI。卡片保持**原尺寸**（原站 320×520、抽奖卡 420×640，再乘原站 1.2 倍缩放）：`envelope.js` 的 `windowSize` / `windowOuterSize` 把卡片显示尺寸加上 `.modal-overlay` 的留白算成开窗尺寸，窗口起来后再按 `outer - inner` 的真实差值收紧一次（最多两轮）；屏幕装不下就不动尺寸，让卡片自己按视口收住。`--envelope-zoom` 恒为 1.2，不要引入原站那条窄屏/矮屏的 0.8 倍降级。卡片本体只有一层：`createNode()` 已经建出 `.redpacket-envelope`，markup 里不得再套同名 class。宿主是固定定位、盖住整个窗口的一层，**关闭卡片时必须连宿主一起撤掉**（`host.remove()`）并让 `:host` 在无卡片时 `pointer-events: none`。卡片样式随包（`envelope.css`）：窗口一加载就把它读成一张 constructable stylesheet，开卡片时同步挂到 shadow root 上，只有读不到时才退回 `<link>` 并在这期间先藏住卡片——`<link>` 是异步的，暗色主题下卡片会先按浏览器默认样式画一帧（v0.9.1）。
+- **详情窗口**：同时只留一个。窗口号与它当前那个红包 id 记在 `chrome.storage.session` 的 `hb-card-window`（只活这一次浏览器会话，重启即清）：同一个红包就把它拉到前面，别的红包就用 `windows.remove` 收掉旧窗口、按新卡片的尺寸重开一个（不要改成 `tabs.update` 去改已有窗口的地址：扩展页能不能被这样导航要看浏览器对扩展源给不给权限），认不到活着的窗口（被关掉了）才新开一个；窗口关掉时自己清掉记录，条目在面板里被删掉时窗口自动关闭。窗口用 `windows.create({ type: 'popup' })` 开，不带标签栏与地址栏。改这几条要同步改 `tests/manifest.test.cjs` 与 `tests/panel-harness.html`。
 - **写请求来源**：站点 POST 接口只认自己那一个 `Origin`，扩展自动附带的 `Origin: chrome-extension://<id>` 会被回 403「请求来源不合法」。因此清单常带 `declarativeNetRequestWithHostAccess` 权限与 `rules.json`（改写 `https://hb.unsnow.org/api/` 的 `Origin`/`Referer`）；两者必须在同一次改动里保持同步，`tests/manifest.test.cjs` 会守住这条。
 - **站点无关**：不注册内容脚本、不注入页面 DOM 或样式、不依赖任何浏览站点的 DOM 结构。站点内嵌模式已放弃（v0.9.6，理由见 `docs/开发计划/浏览器插件化.md` 的 M7），这条是硬约束，不要自行放宽。
 - **状态**：`chrome.storage.local` 的 `hb-state-v1` 是唯一真实来源；所有写入必须经后台消息接口，扩展页面不做本地副本。
@@ -83,7 +86,8 @@ src/
 
 - Chrome：`chrome://extensions` → 开发者模式 → 「加载已解压的扩展程序」选择 `src/`。
 - 静态自检：在 `src/` 下执行 `node --test`（清单与引用文件、口令规则用例，以及后台集成自检：vm 沙箱 + 假时钟 + 假 `fetch` 驱动真实消息契约）。
-- 面板 DOM 自检：把 `tests/panel-harness.html` 复制到扩展产物目录（与 `manifest.json` 同级），用 Chrome 打开或用无头模式 `--dump-dom` 运行（`--window-size=560,900`；窗口至少 424×668 卡片才会铺到原尺寸 384×624，更小的窗口只验证宽度，高度按视口推算）；标题为 `HARNESS-PASS`、`#harness-result` 里 `FAIL 0` 即通过。该文件只用于开发期，不随扩展发布。
+- 面板 DOM 自检：把 `tests/panel-harness.html` 复制到扩展产物目录（与 `manifest.json` 同级），用 Chrome 打开或用无头模式 `--dump-dom` 运行（`--window-size=560,900` 即可，面板已不画卡片，这个尺寸只是给个正常窗口）；标题为 `HARNESS-PASS`、`#harness-result` 里 `FAIL 0` 即通过。该文件只用于开发期，不随扩展发布。
+- 详情窗口 DOM 自检：把 `tests/card-harness.html` 同样复制到产物目录，`?id=` 后面换 `hp1`（普通红包，可领取）、`hp2`（抽奖未报名）、`hp3`（已开）、`missing`（无此条目）各跑一遍；断言窗口尺寸按卡片收紧、卡片挂进宿主且样式先到位、卡片只有一层外壳、合成点击不授权、关掉卡片会关窗口并清掉会话存储里的窗口号。无头下 `screen` 默认 800×600，自检页会先把 `screen.avail*` 顶上去，否则尺寸收紧那几项会被跳过。
 
 ## 产物同步（强制）
 

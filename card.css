@@ -1,0 +1,31 @@
+/* 红包详情窗口这一层的外框。
+ *
+ * 卡片本体的样式在 envelope.css 里（挂在影子 DOM 上），这份只管窗口页面这一层：
+ * 底色垫深一点，窗口打开的一瞬间不闪白，原站那层半透明遮罩（#000 / 0.8）落下来也是
+ * 「暗底上摆一张红包」的观感，和脚本版弹在网页上一致。窗口尺寸由 card.js 按卡片收紧。
+ */
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: #1c1a19;
+}
+
+/* 拿不到红包、条目被删掉之类的兜底说明，占满窗口居中显示。 */
+#hb-card-error {
+  box-sizing: border-box;
+  margin: 0;
+  min-height: 100vh;
+  padding: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #f3efe8;
+  font: 14px/1.6 "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  text-align: center;
+}
+
+/* 作者样式里的 display 比浏览器默认的 [hidden] 优先级高，得自己把隐藏写回来。 */
+#hb-card-error[hidden] {
+  display: none;
+}

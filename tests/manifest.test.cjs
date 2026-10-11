@@ -5,9 +5,21 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { existsSync, readFileSync } = require('node:fs');
 const { join } = require('node:path');
+const vm = require('node:vm');
 
 const root = join(__dirname, '..');
 const manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8'));
+
+// envelope.js 是挂在页面上的 IIFE：给它一个最小沙箱，只为取出卡片尺寸的计算
+// （show/close 要真的碰 DOM，这里不碰）。
+function loadEnvelope() {
+  const sandbox = { console };
+  sandbox.globalThis = sandbox;
+  sandbox.HBProtocol = { isLottery: (packet) => packet?.type === 'lottery' };
+  const context = vm.createContext(sandbox);
+  vm.runInContext(readFileSync(join(root, 'envelope.js'), 'utf8'), context, { filename: 'envelope.js' });
+  return sandbox.HBEnvelope;
+}
 
 function referencedFiles(spec) {
   const files = [];
@@ -90,17 +102,26 @@ test('面板版本号来自清单而不是硬编码', () => {
 });
 
 test('红包详情卡片随包，头像只从红包站来源加载', () => {
-  for (const file of ['envelope.js', 'envelope.css']) {
+  for (const file of ['envelope.js', 'envelope.css', 'card.html', 'card.css', 'card.js']) {
     assert.ok(existsSync(join(root, file)), file + ' 缺失');
   }
+  // 面板页面也引入 envelope.js，只为拿卡片的窗口尺寸（HBEnvelope.windowSize）；
+  // 卡片本身只在详情窗口 card.html 里渲染。
   for (const page of ['popup.html', 'sidepanel.html']) {
     const html = readFileSync(join(root, page), 'utf8');
     assert.match(html, /src="hb-protocol\.js"/, page + ' 未引入协议层');
     assert.match(html, /src="envelope\.js"/, page + ' 未引入红包卡片');
   }
+  const cardPage = readFileSync(join(root, 'card.html'), 'utf8');
+  assert.match(cardPage, /src="hb-protocol\.js"/, 'card.html 未引入协议层');
+  assert.match(cardPage, /src="envelope\.js"/, 'card.html 未引入红包卡片');
+  assert.match(cardPage, /src="card\.js"/, 'card.html 未引入详情窗口脚本');
+  assert.match(cardPage, /href="card\.css"/, 'card.html 未引入窗口外框样式');
   // 卡片样式随包，不得出现 @import 或远程 url()。
   const css = readFileSync(join(root, 'envelope.css'), 'utf8');
   assert.equal(/@import|url\(\s*["']?https?:/i.test(css), false, '信封样式引用了远程资源');
+  assert.equal(/@import|url\(\s*["']?https?:/i.test(readFileSync(join(root, 'card.css'), 'utf8')),
+    false, '详情窗口样式引用了远程资源');
   // 头像是卡片里唯一的远程图形，必须锁死在红包站来源，其余用内联 SVG。
   const js = readFileSync(join(root, 'envelope.js'), 'utf8');
   assert.match(js, /HB_SITE_URL/, 'envelope.js 未使用红包站地址');
@@ -144,31 +165,72 @@ test('面板按脚本版侧边栏的结构复刻控件', () => {
   assert.match(readFileSync(join(root, 'sidepanel.js'), 'utf8'), /shell: 'sidebar'/);
 });
 
-test('红包卡片保持原尺寸，弹出面板按卡片留位', () => {
+test('红包卡片保持原尺寸，详情窗口按卡片开窗', () => {
   const css = readFileSync(join(root, 'envelope.css'), 'utf8');
   // 卡片尺寸沿用原站：320×520 再乘 1.2 倍缩放（常规则显示为 384×624），抽奖卡 420×640。
   assert.match(css, /width: min\(320px, 100%\)/, '卡片不再是原站的 320 基准宽');
   assert.match(css, /height: min\(520px, calc\(\(100dvh - var\(--edge-top\) - var\(--edge-bottom\)\) \/ var\(--envelope-zoom\)\)\)/, '卡片不再是原站的 520 基准高');
   assert.match(css, /width: min\(420px, 100%\)/, '抽奖卡不再是原站的 420 基准宽');
   assert.match(css, /--envelope-zoom: 1\.2;/, '卡片缩放不再是原站的 1.2 倍');
-  assert.equal(/--envelope-zoom: \.8/.test(css), false, '面板里不该按窗口尺寸缩小卡片，窗口该加大');
-  // 窗口不够大就加大面板：宽度要容下最大的卡片（504 + 两侧 20px 边距）。
-  const panel = readFileSync(join(root, 'panel.css'), 'utf8');
-  const popup = /body\.hb-popup \{[^}]*\}/.exec(panel);
+  assert.equal(/--envelope-zoom: \.8/.test(css), false, '详情窗口按卡片开窗，不该再按窗口尺寸缩小卡片');
+
+  // 窗口尺寸由 envelope.js 算出来，这里直接跑一遍真实取值：卡片显示尺寸 + .modal-overlay 的
+  // 留白（左右各 20px，上下 20/24px）。开窗时先按外框估尺寸，窗口起来后再用真实差值收紧。
+  const geometry = loadEnvelope();
+  // 沙箱里造出来的对象原型与这边不同，取成数字再比，免得 deepStrictEqual 拿原型说事。
+  const sizeOf = (packet) => {
+    const size = geometry.windowSize(packet);
+    return [size.width, size.height];
+  };
+  const outerOf = (packet) => {
+    const size = geometry.windowOuterSize(packet);
+    return [size.width, size.height];
+  };
+  assert.deepEqual(sizeOf({ type: 'random' }), [424, 668], '普通红包的窗口视口尺寸不对');
+  assert.deepEqual(sizeOf({ type: 'lottery' }), [544, 812], '抽奖红包的窗口视口尺寸不对');
+  assert.deepEqual(outerOf({ type: 'random' }), [440, 708], '普通红包的开窗外框尺寸不对');
+  assert.deepEqual(outerOf({ type: 'lottery' }), [560, 852], '抽奖红包的开窗外框尺寸不对');
+
+  // 面板自己不再画卡片：不给卡片撑高、不留撑高标记，平时也不留固定高度。
+  const panelCss = readFileSync(join(root, 'panel.css'), 'utf8');
+  const popup = /body\.hb-popup \{[^}]*\}/.exec(panelCss);
   assert.ok(popup, '面板样式里缺少弹出面板外壳规则');
-  const width = /width: (\d+)px/.exec(popup[0]);
-  assert.ok(width && Number(width[1]) >= 544, '弹出面板宽度放不下原尺寸的卡片：' + (width && width[1]));
-  // 平时不留固定高度：下面那块空白交给口令历史，内容多高面板就多高。
   assert.equal(/min-height: \d+px/.test(popup[0]), false, '弹出面板又按固定高度留出一块空底');
-  // 卡片打开时才把窗口撑到浏览器上限（600px），卡片按原尺寸铺开。
-  const openCard = /body\.hb-popup\.hb-card-open \{[^}]*\}/.exec(panel);
-  assert.ok(openCard, '缺少卡片打开时撑高弹出面板的规则');
-  const height = /min-height: (\d+)px/.exec(openCard[0]);
-  assert.ok(height && Number(height[1]) >= 600, '卡片打开时面板高度放不下原尺寸的卡片：' + (height && height[1]));
-  // 撑高标记由卡片自己打上、关掉时收回。
-  const envelope = readFileSync(join(root, 'envelope.js'), 'utf8');
-  assert.match(envelope, /document\.body\.classList\.add\(CARD_OPEN_CLASS\)/, '打开卡片时没有给弹出面板打招呼撑高');
-  assert.match(envelope, /document\.body\.classList\.remove\(CARD_OPEN_CLASS\)/, '关掉卡片时没有收回撑高标记');
+  assert.equal(panelCss.includes('hb-card-open'), false, 'panel.css 里又出现了卡片撑高面板的规则');
+  for (const file of ['panel.js', 'envelope.js', 'card.js']) {
+    assert.equal(readFileSync(join(root, file), 'utf8').includes('hb-card-open'), false,
+      file + ' 又在给面板打撑高标记');
+  }
+});
+
+test('历史行的开红包走独立详情窗口', () => {
+  const panel = readFileSync(join(root, 'panel.js'), 'utf8');
+  // 点「开红包／参与抽选／查看」= 开一个 card.html?id=… 的小窗口，尺寸按卡片算。
+  assert.match(panel, /const CARD_PAGE = 'card\.html';/, '面板里没有详情页地址');
+  assert.match(panel, /api\.runtime\.getURL\(CARD_PAGE\) \+ '\?id=' \+ encodeURIComponent\(id\)/, '详情窗口没有带上红包 id');
+  assert.match(panel, /api\.windows\.create\(\{ url, type: 'popup', focused: true, width: size\.width, height: size\.height \}\)/, '面板没有开详情窗口');
+  assert.match(panel, /const size = envelope\.windowOuterSize\(entry\.packet\);/, '开窗尺寸没有按卡片算');
+  assert.equal(/envelope\.show\(/.test(panel), false, '面板又在自己的页面里画卡片');
+  // 同一时刻只留一个详情窗口：窗口号记在会话存储里，还活着就复用（同一个红包拉到前面，
+  // 换个红包把旧窗口关掉重开），窗口没了才新开一个。
+  assert.match(panel, /const CARD_WINDOW_KEY = 'hb-card-window';/, '缺少详情窗口的记录键');
+  assert.match(panel, /api\.storage\.session\.get\(CARD_WINDOW_KEY\)/, '面板没有读详情窗口记录');
+  assert.match(panel, /api\.windows\.get\(record\.windowId\)/, '没有确认旧窗口是否还活着');
+  assert.match(panel, /api\.windows\.remove\(existing\.id\)/, '换个红包时没有收掉旧窗口');
+  assert.match(panel, /api\.windows\.update\(existing\.id, \{ focused: true \}\)/, '没有把已有窗口拉到前面');
+  assert.equal(/api\.tabs\.update\(/.test(panel), false, '又用 tabs.update 去改已有窗口的地址了（扩展页能不能这样导航不保证）');
+
+  const card = readFileSync(join(root, 'card.js'), 'utf8');
+  assert.match(card, /new URLSearchParams\(location\.search\)\.get\('id'\)/, '详情窗口没有从 URL 取红包 id');
+  assert.match(card, /envelope\.show\(\{/, '详情窗口没有挂卡片');
+  // 领取与参与照旧回到后台的一次性授权链路：真实点击 → hb:claim（trusted），后台再校验状态。
+  assert.match(card, /onWrite: \(\) => send\(\{ type: 'hb:claim', id: entryId, trusted: true \}\)/, '领取与参与没有走后台的一次性授权');
+  // 窗口自己认领：起来时登记窗口号（面板据此复用），关掉时清掉（面板下次新开）。
+  assert.match(card, /api\.storage\.session\.set\(\{ \[CARD_WINDOW_KEY\]: \{ windowId, entryId \} \}\)/, '详情窗口没有登记窗口号');
+  assert.match(card, /api\.storage\.session\.remove\(CARD_WINDOW_KEY\)/, '详情窗口关掉后没有清掉记录');
+  assert.match(card, /onClose: \(\) => window\.close\(\)/, '关掉卡片没有关窗口');
+  // onClose 只认「用户关掉卡片」：show() 换卡片时会先收起上一张，那一次不能把窗口关掉。
+  assert.match(readFileSync(join(root, 'envelope.js'), 'utf8'), /closeCard\(replaced\)/, '换卡片与用户关卡片没有区分开');
 });
 
 test('面板里没有脚本版侧边栏之外的常驻提示区', () => {
