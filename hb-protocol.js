@@ -299,7 +299,7 @@
       return {
         title: '这是你发出的红包',
         amount: packet.claimed_amount || 0,
-        detail: '口令 ' + (packet.code || '--------'),
+        detail: '可以一键复制口令和网址分享给其他人',
         lines: match.concat(line('未领取: 这是你发出的红包', 'muted')),
       };
     }

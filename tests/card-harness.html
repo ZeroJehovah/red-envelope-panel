@@ -8,6 +8,7 @@
        card-harness.html?id=hp1        待开启的普通红包（可领）
        card-harness.html?id=hp2        抽奖红包（未报名）
        card-harness.html?id=hp3        已领取完的历史红包
+       card-harness.html?id=hp4        已领完且自己没领到（金额显示 0.00）
        card-harness.html?id=missing    条目不在时的兜底说明
 
      无头运行示例（窗口至少 424×668，卡片才铺到原尺寸 384×624）：
@@ -59,6 +60,15 @@
           creator: { username: 'alice', linuxdo_id: 1 }, count: 5, claimed_count: 2, claimed_amount: 1.23,
           mine: 1.23, claims: [{ share_id: 7, username: 'carol', amount: 1.23, at: 2 }],
         },
+        hp4: {
+          id: 'hp4', type: 'random', status: 'exhausted', code: '80146763', wish: '恭喜发财，大吉大利',
+          creator: { username: 'oftx', linuxdo_id: 447199, avatar_url: 'https://cdn.ldstatic.com/user_avatar/linux.do/oftx/288/2162182_2.png' },
+          count: 11, claimed_count: 11, claimed_amount: 125, mine: null, luckiest_claim_id: 15143,
+          claims: [
+            { share_id: 15145, username: 'jackwyw', linuxdo_id: 435753, avatar_url: 'https://cdn.ldstatic.com/user_avatar/linux.do/jackwyw/288/2353156_2.png', amount: 0.87, at: 5 },
+            { share_id: 15143, username: 'Yueby', linuxdo_id: 217875, avatar_url: 'https://cdn.ldstatic.com/user_avatar/linux.do/yueby/288/1499203_2.png', amount: 25.31, at: 4 },
+          ],
+        },
       };
       const state = {
         entries: [
@@ -79,6 +89,12 @@
             result: '领取成功: +1.23 LDC', lines: [{ text: '领取成功: +1.23 LDC', tone: 'success' }],
             packet: { id: 'hp3', type: 'random', status: 'exhausted', code: '11775521', mine: 1.23, creator: { username: 'alice', linuxdo_id: 1 } },
             packetId: 'hp3', matched: true, createdAt: 3,
+          },
+          {
+            id: 'hp4', code: '80146763', charset: 'numeric', claimMode: 'manual', status: 'done',
+            result: '未领取: 红包已抢光', lines: [{ text: '未领取: 红包已抢光', tone: 'muted' }],
+            packet: { id: 'hp4', type: 'random', status: 'exhausted', code: '80146763', mine: null, creator: { username: 'oftx', linuxdo_id: 447199 } },
+            packetId: 'hp4', matched: true, createdAt: 4,
           },
         ],
         settings: { charset: 'text', batch: false, claimMode: 'manual', gapExtraMs: 0, display: 'panel' },
@@ -222,6 +238,27 @@
                 && inCard('#env-claims-list').querySelectorAll('.envelope-claim-row').length === 1);
               check('收起封口视图',
                 Boolean(inCard('#envelope-closed-view')) && inCard('#envelope-closed-view').style.display === 'none');
+            }
+
+            if (entryId === 'hp4') {
+              // 原站 showEnvelopeResult('红包已被领取完', 0, …)：自己没领到也照样把 0.00 显示出来。
+              check('没领到的已领完红包照样显示 0.00',
+                Boolean(inCard('#env-claimed-amount')) && inCard('#env-claimed-amount').hidden === false
+                && String(inCard('#env-claimed-amount').textContent).startsWith('0.00'),
+                inCard('#env-claimed-amount') && (inCard('#env-claimed-amount').textContent + ' hidden=' + inCard('#env-claimed-amount').hidden));
+              check('标题是原站的「红包已被领取完」',
+                String((inCard('#env-opened-title') || {}).textContent || '') === '红包已被领取完',
+                inCard('#env-opened-title') && inCard('#env-opened-title').textContent);
+              // 原站 claimAvatarSrc 直接用站点返回的地址，卡片不再把它挡成占位图。
+              const avatars = Array.from((card() || { querySelectorAll: () => [] }).querySelectorAll('.envelope-claim-user img'))
+                .map((img) => img.getAttribute('src'));
+              check('头像用站点返回的地址',
+                avatars.length === 2 && avatars.every((src) => String(src).startsWith('https://cdn.ldstatic.com/')),
+                JSON.stringify(avatars));
+              check('领取记录保持原站的排序（手气王在前）',
+                (card().querySelector('.envelope-claim-user span') || {}).textContent === 'Yueby');
+              // 原站卡片上没有「×」：关窗口交给窗口自己，卡片里只有「确定」。
+              check('卡面上没有原站没有的 × 按钮', !card().querySelector('.envelope-dismiss'));
             }
 
             // 关掉卡片就等于关窗口：宿主也不能留在 DOM 里（它是盖住整页的一层）。

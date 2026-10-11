@@ -101,7 +101,7 @@ test('面板版本号来自清单而不是硬编码', () => {
   assert.equal(panel.includes("'" + manifest.version + "'"), false, 'panel.js 不应硬编码版本号');
 });
 
-test('红包详情卡片随包，头像只从红包站来源加载', () => {
+test('红包详情卡片随包，头像用站点返回的地址', () => {
   for (const file of ['envelope.js', 'envelope.css', 'card.html', 'card.css', 'card.js']) {
     assert.ok(existsSync(join(root, file)), file + ' 缺失');
   }
@@ -122,10 +122,12 @@ test('红包详情卡片随包，头像只从红包站来源加载', () => {
   assert.equal(/@import|url\(\s*["']?https?:/i.test(css), false, '信封样式引用了远程资源');
   assert.equal(/@import|url\(\s*["']?https?:/i.test(readFileSync(join(root, 'card.css'), 'utf8')),
     false, '详情窗口样式引用了远程资源');
-  // 头像是卡片里唯一的远程图形，必须锁死在红包站来源，其余用内联 SVG。
+  // 头像地址照原站 claimAvatarSrc：站点返回什么就用什么（linux.do 的头像在 cdn.ldstatic.com），
+  // 拿不到或不是 http(s) 才回落到内联 SVG。协议请求仍然只发 hb.unsnow.org。
   const js = readFileSync(join(root, 'envelope.js'), 'utf8');
   assert.match(js, /HB_SITE_URL/, 'envelope.js 未使用红包站地址');
-  assert.match(js, /url\.origin !== site\.origin/, '头像来源没有做同源限制');
+  assert.match(js, /\['http:', 'https:'\]\.includes\(url\.protocol\)/, '头像不再接受站点返回的地址');
+  assert.equal(js.includes('site.origin'), false, '头像又被限制回同源，站点返回的头像会全部变成占位图');
   assert.match(js, /data:image\/svg\+xml/, '缺少内联 SVG 头像兜底');
   // 卡片本体由 createNode() 建出来，markup 里再套一层 .redpacket-envelope
   // 会把 34/24px 内边距、12px 圆角与 520px 定高叠两遍，底部多出一截空红底。
@@ -231,6 +233,49 @@ test('历史行的开红包走独立详情窗口', () => {
   assert.match(card, /onClose: \(\) => window\.close\(\)/, '关掉卡片没有关窗口');
   // onClose 只认「用户关掉卡片」：show() 换卡片时会先收起上一张，那一次不能把窗口关掉。
   assert.match(readFileSync(join(root, 'envelope.js'), 'utf8'), /closeCard\(replaced\)/, '换卡片与用户关卡片没有区分开');
+});
+
+test('卡片显示的内容与红包站卡片一致', () => {
+  // 逐条对齐 hb.unsnow.org 的 app.js（v=a0a5b8fa）：showEnvelopeResult / renderEnvelopeClaims /
+  // renderLottery。上一版把「不是自己领的红包」的金额抹成 null，看起来和原站就差了那一大块数字。
+  const js = readFileSync(join(root, 'envelope.js'), 'utf8');
+  // 原站 showEnvelopeResult 对已领完/已过期/已取消/专属红包传的就是 0，卡片照显 0.00 LDC。
+  assert.equal(/amount: owned \? Number\(packet\.mine\) : null/.test(js), false,
+    '又按「是不是自己领的」把金额抹掉了');
+  assert.match(js, /const outcome = P\.packetOutcome\(packet, state\.user\);\n\s*if \(outcome\) return outcome;/,
+    '历史条目的结论没有直接照用 packetOutcome 的金额');
+  // 刷新领取记录时接着原来的滚动位置（原站 renderEnvelopeClaims 的 scrollTop）。
+  assert.match(js, /const scrollTop = list\.scrollTop;/, '刷新领取记录时没有记住滚动位置');
+  assert.match(js, /list\.scrollTop = scrollTop;/, '刷新领取记录后没有恢复滚动位置');
+  // 抽奖卡片：已报名显示「已参与抽选」而不是把按钮藏掉，空名单与「自己发的」文案照原站。
+  assert.match(js, /join\.textContent = state\.busy \? '正在参与…' : packet\.joined \? '已参与抽选' : '参与抽选';/,
+    '抽奖按钮的文案/禁用态没有按原站');
+  assert.equal(/join\.hidden = state\.viewOnly \|\| ended \|\| creator \|\| Boolean\(packet\.joined\)/.test(js), false,
+    '已报名的抽奖又把按钮藏回去了（原站是禁用 + 「已参与抽选」）');
+  assert.match(js, /'无人参与，红包已关闭，未扣款。'/, '中奖公示为空的文案没有按原站');
+  assert.match(js, /'这是你发出的红包，参与名单实时更新'/, '自己发出的抽奖红包文案没有按原站');
+  assert.match(js, /'连接恢复中，正在定时更新'/, '抽奖卡片掉线时的提示没有按原站');
+
+  // 卡面上不该有原站没有的「×」：原站卡片只有「开」/「确定」/「关闭」，关窗口交给窗口自己。
+  assert.equal(js.includes('envelope-dismiss'), false, '卡片又加回了原站没有的关闭按钮');
+  const css = readFileSync(join(root, 'envelope.css'), 'utf8');
+  assert.equal(css.includes('envelope-dismiss'), false, '样式里还留着「×」的规则');
+  // 遮罩用原站那一层（rgba(24,24,27,.5)，暗色主题再深一档），不是脚本版弹在论坛上的 PhotoSwipe 黑底。
+  assert.match(css, /background: rgba\(24, 24, 27, 0\.5\);/, '遮罩不是原站的 rgba(24, 24, 27, 0.5)');
+  assert.match(css, /@media \(prefers-color-scheme: dark\) \{[\s\S]*?\.modal-overlay \{\n\s*background: rgba\(0, 0, 0, 0\.62\);/, '暗色主题的遮罩没有按原站加深');
+  assert.equal(/background: #000;\n\s*opacity: 0\.8;/.test(css), false, '遮罩又用回脚本版的黑底 0.8');
+  // 结果视图的合成层要与原站那段入场动画留下的层一致，文字抗锯齿才逐像素相同。
+  assert.match(css, /\.envelope-details \{[\s\S]*?will-change: opacity;/, '结果视图没有补齐原站那层合成');
+  // 详情窗口的外框底色用原站页面底色，那层半透明遮罩落下来才是同一圈灰。
+  const cardCss = readFileSync(join(root, 'card.css'), 'utf8');
+  assert.match(cardCss, /background: #ffffff;/, '详情窗口底色不是原站页面底色');
+  assert.match(cardCss, /@media \(prefers-color-scheme: dark\) \{[\s\S]*?background: #18181b;/, '详情窗口暗色底没有对齐原站');
+});
+
+test('自己发出的红包那句文案与红包站一致', () => {
+  // 原站 showEnvelopeResult('这是你发出的红包', …, '可以一键复制口令和网址分享给其他人')。
+  const protocol = readFileSync(join(root, 'hb-protocol.js'), 'utf8');
+  assert.match(protocol, /detail: '可以一键复制口令和网址分享给其他人'/, '自己发出的红包文案没有对齐原站');
 });
 
 test('面板里没有脚本版侧边栏之外的常驻提示区', () => {

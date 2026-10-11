@@ -11,11 +11,15 @@
  *     从 v0.9.7 起由面板另开一个独立小窗口来放卡片；
  *   - 一次只展示一张卡片，没有脚本版的多卡堆叠与「全部关闭」；
  *   - 关闭卡片不会把条目改写成「未领取」：面板里条目留在「待开启」，可以再次打开；
- *   - 头像只在 hb.unsnow.org 同源时联网加载，其余情况用原站的确定性 SVG，
- *     保持「面板唯一的网络目标」。
+ *   - 头像用原站返回的地址加载（和原站 claimAvatarSrc 一致），取不到或不合法时
+ *     回落到原站那套确定性 SVG；协议请求仍然只发往 hb.unsnow.org。
  *
  * 写操作仍然只认真实点击：卡片上的「开」/「参与抽选」转成一次 hb:claim，
  * 后台还会再校验条目状态，一次点击只放行一条请求。
+ *
+ * 显示内容按原站 app.js（v=a0a5b8fa）逐条对齐：未领取的终态（已领完/已过期/已取消）
+ * 与专属红包同样把金额显示成 0.00；卡面不再自加原站没有的「×」按钮；
+ * 领取记录刷新时保持滚动位置；抽奖卡片已报名时按钮显示「已参与抽选」而不是消失。
  */
 'use strict';
 
@@ -138,14 +142,13 @@
     return getAvatarDataURI(avatarKeyFor(user?.linuxdo_id ?? user?.username ?? 'hongbao'));
   }
 
-  // 头像只从红包站自己的来源加载：面板唯一的网络目标就是它，其它地址一律用内联 SVG。
-  function siteAvatarUrl(user) {
+  // 头像地址就用原站返回的那一个（原站 claimAvatarSrc：有 avatar_url 就用它，没有才兜底），
+  // 只挡掉拿不到或不是 http(s) 的取值，避免把奇怪协议塞进 img。
+  function remoteAvatarUrl(user) {
     const raw = user?.avatar_url;
     if (typeof raw !== 'string' || !raw) return '';
     try {
       const url = new URL(raw, P.HB_SITE_URL);
-      const site = new URL(P.HB_SITE_URL);
-      if (url.origin !== site.origin) return '';
       return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
     } catch {
       return '';
@@ -154,7 +157,7 @@
 
   function setAvatar(image, user) {
     if (!image) return;
-    const src = siteAvatarUrl(user);
+    const src = remoteAvatarUrl(user);
     if (!src) {
       image.onerror = null;
       image.src = fallbackAvatar(user);
@@ -236,12 +239,6 @@
     } else {
       node.innerHTML = ENVELOPE_MARKUP;
     }
-    const dismiss = document.createElement('button');
-    dismiss.type = 'button';
-    dismiss.className = 'envelope-dismiss';
-    dismiss.textContent = '×';
-    dismiss.setAttribute('aria-label', '关闭红包');
-    node.append(dismiss);
     return node;
   }
 
@@ -279,8 +276,6 @@
       open.disabled = busy;
       open.classList.toggle('spinning', busy);
     }
-    const dismiss = state.node.querySelector('.envelope-dismiss');
-    if (dismiss) dismiss.disabled = busy;
     const join = state.node.querySelector('#lottery-join');
     if (join && !join.hidden) {
       join.disabled = busy;
@@ -312,6 +307,8 @@
 
     const list = node.querySelector('#env-claims-list');
     if (!list) return;
+    // 原站重画领取记录时会接着原来的滚动位置（renderEnvelopeClaims 里的 scrollTop）。
+    const scrollTop = list.scrollTop;
     const luckiest = (claim) => packet.type === 'random' && packet.luckiest_claim_id != null
       && String(claim.share_id) === String(packet.luckiest_claim_id);
     const claims = (Array.isArray(packet.claims) ? packet.claims : [])
@@ -352,6 +349,7 @@
       row.append(user, amount);
       list.append(row);
     }
+    list.scrollTop = scrollTop;
   }
 
   function renderResult(state, outcome, packet, stale = false) {
@@ -393,13 +391,12 @@
   }
 
   // 历史条目（只读）：结论直接由红包快照推出来，没有领取请求也没有授权入口。
+  // 金额照原站处理：终态（已领完/已过期/已取消）与专属红包都显示 0.00，
+  // 不是自己领的也照显——原站 showEnvelopeResult 传的就是 0，不按「有没有 mine」抹掉。
   function storedOutcome(state) {
     const packet = state.packet;
     const outcome = P.packetOutcome(packet, state.user);
-    const owned = packet.mine != null;
-    if (outcome) {
-      return { ...outcome, amount: owned ? Number(packet.mine) : null, already: owned || outcome.already === true };
-    }
+    if (outcome) return outcome;
     return {
       title: '来自 ' + (packet.creator?.username || '') + ' 的红包',
       detail: '尚未领取此红包',
@@ -439,7 +436,10 @@
           : (remaining > 0 ? Math.ceil(remaining / 1000) + ' 秒' : '正在公布结果…');
     }
     const join = node.querySelector('#lottery-join');
-    if (join && !join.hidden && !state.busy) join.disabled = remaining !== null && remaining <= 0;
+    if (join && !join.hidden) {
+      join.disabled = Boolean(state.busy) || Boolean(state.packet?.joined)
+        || (remaining !== null && remaining <= 0);
+    }
     if (ended) {
       stopClock(state);
       return;
@@ -472,10 +472,11 @@
       ? (winner ? '你已中奖 ' + (Number(winner.amount) || 0).toFixed(2) + ' LDC · ' + P.lotteryPayoutText(winner.payout_status)
         : creator ? '结果已公示，未发出的份额已关闭且不会扣款'
           : packet.joined ? '本次未抽中，感谢参与' : '报名已截止，仅可查看记录')
-      : creator ? '这是你发出的红包'
+      : creator ? '这是你发出的红包，参与名单实时更新'
         : packet.joined ? '已参与，等待倒计时结束自动抽选'
           : (state.error || (state.viewOnly ? '请到红包站手动参与抽选' : '点击参与抽选，截止前每人可参与一次')));
-    set('#lottery-connection', '当前领取记录快照');
+    // 原站平时这一行是空的，只有 EventSource 掉线时才写「连接恢复中，正在定时更新」。
+    set('#lottery-connection', state.connectionNote || '');
 
     const winnersSection = node.querySelector('#lottery-winners-section');
     if (winnersSection) winnersSection.hidden = !ended;
@@ -519,7 +520,7 @@
       if (!people.length) {
         const empty = document.createElement('p');
         empty.className = 'lottery-empty';
-        empty.textContent = selector === '#lottery-winners' ? '无人中奖' : '还没有人参与';
+        empty.textContent = selector === '#lottery-winners' ? '无人参与，红包已关闭，未扣款。' : '还没有人参与';
         list.append(empty);
       }
     }
@@ -527,11 +528,10 @@
     // 按钮只在还能报名时出现：已结束、自己发的、已报名、历史卡片都不给写入动作。
     const join = node.querySelector('#lottery-join');
     if (join) {
-      join.hidden = state.viewOnly || ended || creator || Boolean(packet.joined);
-      if (!join.hidden) {
-        join.disabled = Boolean(state.busy);
-        join.textContent = state.busy ? '正在参与…' : '参与抽选';
-      }
+      // 原站：已报名不隐藏按钮，改成禁用并显示「已参与抽选」（renderLottery）。
+      join.hidden = state.viewOnly || ended || creator;
+      join.disabled = Boolean(state.busy) || Boolean(packet.joined);
+      join.textContent = state.busy ? '正在参与…' : packet.joined ? '已参与抽选' : '参与抽选';
     }
     syncClock(state);
   }
@@ -557,12 +557,20 @@
       Promise.resolve(state.onRefresh(network)).then((fresh) => {
         if (state.closed || !fresh || !fresh.id) return;
         state.packet = fresh;
-        if (P.isLottery(fresh)) renderLottery(state);
+        if (P.isLottery(fresh)) {
+          state.connectionNote = '';
+          renderLottery(state);
+        }
         if (lotteryEnded(state)) {
           stopPolling(state);
           stopClock(state);
         }
-      }, () => {});
+      }, () => {
+        // 这一轮没读到：用原站掉线时的同一句提示，读回来时上面会自动清掉。
+        if (state.closed) return;
+        state.connectionNote = '连接恢复中，正在定时更新';
+        if (P.isLottery(state.packet)) renderLottery(state);
+      });
     }, POLL_INTERVAL_MS);
   }
 
@@ -659,6 +667,7 @@
       timer: null,
       poll: null,
       serverOffset: 0,
+      connectionNote: '',
     };
     overlay.append(node);
     overlay.classList.add('active');
@@ -667,7 +676,7 @@
     node.addEventListener('click', (event) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      if (target.closest('.envelope-dismiss') || target.closest('.envelope-close-btn') || target.closest('#lottery-close')) {
+      if (target.closest('.envelope-close-btn') || target.closest('#lottery-close')) {
         if (!state.busy) closeCard();
       }
     });
