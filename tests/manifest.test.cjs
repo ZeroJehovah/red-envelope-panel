@@ -228,16 +228,26 @@ test('关掉红包卡片后面板还能点', () => {
   assert.match(host, /pointer-events: none/, '宿主层没有让开指针事件');
 });
 
-test('历史行红包图标是「主体红 + 封口金」', () => {
-  // 脚本版同处把第三段 path 写成 fill="#eab308"（LINUXDO.md：主体红色且中间圆点金色）。
-  // v0.7.0 复刻成插件时换成了 hb-packet-seal 这个 class，却没补上对应样式，
-  // 历史行那颗图标整颗变成纯红，扩展图标也跟着丢了金色封口，这里守住这条。
+test('历史行红包图标与脚本版同色（主体红 + 封口金）', () => {
+  // 脚本版同处写死 color:#dc2626、:hover #b91c1c，第三段 path 写死 fill="#eab308"
+  // （LINUXDO.md：主体红色且中间圆点金色）。面板照搬这三个站点色，不套莫兰迪红金——
+  // 这枚字形是站点品牌图形，套上面板配色会比脚本版淡一截。v0.7.0 复刻成插件时把它换成了
+  // hb-packet-seal 这个 class、却没补上对应样式，历史行那颗图标一度整颗变成纯红，
+  // 扩展图标也跟着丢了金色封口，这里守住这条。
   const panelJs = readFileSync(join(root, 'panel.js'), 'utf8');
   assert.match(panelJs, /class="hb-packet-seal"/, 'panel.js 没有标记出中间那枚封口盘');
   const panelCss = readFileSync(join(root, 'panel.css'), 'utf8');
-  assert.match(panelCss, /\.hb-entry-packet \.hb-packet-seal \{[^}]*fill:\s*var\(--hb-gold\)/,
-    '面板没有把封口盘涂成封口金');
+  const block = (selector) => {
+    const found = panelCss.match(new RegExp(
+      selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\{[^}]*\\}'));
+    assert.ok(found, 'panel.css 里找不到 ' + selector);
+    return found[0];
+  };
+  assert.match(block('.hb-entry-packet'), /color:\s*#dc2626\b/, '历史行红包主体不是脚本版那颗红');
+  assert.match(block('.hb-entry-packet:hover'), /color:\s*#b91c1c\b/, '历史行红包悬停色与脚本版不一致');
+  assert.match(block('.hb-entry-packet .hb-packet-seal'), /fill:\s*#eab308\b/, '封口盘不是脚本版那颗金');
   const tool = readFileSync(join(root, 'tools', 'make-icons.py'), 'utf8');
-  assert.match(tool, /GOLD = \(201, 143, 75, 255\)/, '图标生成脚本里没有封口金');
+  assert.match(tool, /RED = \(220, 38, 38, 255\)/, '图标生成脚本的主体红与脚本版不一致');
+  assert.match(tool, /GOLD = \(234, 179, 8, 255\)/, '图标生成脚本的封口金与脚本版不一致');
   assert.match(tool, /SEAL_PATHS = PACKET_ICON_PATHS\[2:\]/, '图标生成脚本没有把封口盘单独画一层');
 });

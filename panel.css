@@ -477,7 +477,9 @@ body.hb-popup .hb-list {
   padding: 0 2px;
   border: 0;
   background: transparent;
-  color: var(--hb-red);
+  /* 这枚红包字形是站点的品牌图形（跟红包卡片同一类），配色照脚本版写死：
+   * 主体 #dc2626、悬停 #b91c1c，不套面板的莫兰迪红——套上去比脚本版淡一截。 */
+  color: #dc2626;
   font: inherit;
   line-height: inherit;
   cursor: pointer;
@@ -492,14 +494,14 @@ body.hb-popup .hb-list {
 }
 
 .hb-entry-packet:hover {
-  color: var(--hb-red-strong);
+  color: #b91c1c;
 }
 
-/* 三段字形的中间那枚封口盘用封口金（脚本版同处写死 fill="#eab308"，即 LINUXDO.md 里的
- * 「主体红色且中间圆点金色」；面板按配色规范取 --hb-gold）。v0.7.0 复刻时只带来了
+/* 三段字形的中间那枚封口盘用站点封口金（脚本版同处写死 fill="#eab308"，即 LINUXDO.md 里的
+ * 「主体红色且中间圆点金色」，这里跟主体一样照脚本版取值）。v0.7.0 复刻时只带来了
  * hb-packet-seal 这个 class、没有带上颜色，历史行那颗图标一度整颗都是红的。 */
 .hb-entry-packet .hb-packet-seal {
-  fill: var(--hb-gold);
+  fill: #eab308;
 }
 
 .hb-entry-void,
