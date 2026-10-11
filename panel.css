@@ -495,6 +495,13 @@ body.hb-popup .hb-list {
   color: var(--hb-red-strong);
 }
 
+/* 三段字形的中间那枚封口盘用封口金（脚本版同处写死 fill="#eab308"，即 LINUXDO.md 里的
+ * 「主体红色且中间圆点金色」；面板按配色规范取 --hb-gold）。v0.7.0 复刻时只带来了
+ * hb-packet-seal 这个 class、没有带上颜色，历史行那颗图标一度整颗都是红的。 */
+.hb-entry-packet .hb-packet-seal {
+  fill: var(--hb-gold);
+}
+
 .hb-entry-void,
 .hb-entry-delete {
   margin-left: auto;

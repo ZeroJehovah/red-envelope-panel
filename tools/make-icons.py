@@ -2,9 +2,11 @@
 """生成扩展图标（16/32/48/128 PNG）。
 
 图形沿用面板历史行「查看红包详情」按钮里的那颗红包字形（`src/panel.js` 的
-`PACKET_ICON_PATHS`，与脚本版网站行内按钮同一组 path）：红包红 #c05c5c 单色填充、
-透明底，等比放到画布里最大。字形本身是 793.6×1024 的竖长红包，上片的封口弧线把封口
-圆环留成负空间，因此按高度铺到画布的 96%、横向居中。
+`PACKET_ICON_PATHS`，与脚本版网站行内按钮同一组 path）：前两段是红包本体，填红包红
+#c05c5c；第三段是压在封口弧线上的封口盘，填封口金 #c98f4b（脚本版同处写的是
+fill="#eab308"，即 LINUXDO.md 说的「主体红色且中间圆点金色」）。透明底，等比放到
+画布里最大：字形本身是 793.6×1024 的竖长红包，上片的封口弧线把封口圆环留成负空间，
+因此按高度铺到画布的 96%、横向居中。
 
 先画一张 2048 的母版再降采样到各尺寸：字形里最细的负空间只有约 3.5% 的画布高度，
 直接按目标尺寸画会让小尺寸下的圆环糊成一片。
@@ -17,6 +19,7 @@ import re
 from PIL import Image, ImageDraw
 
 RED = (192, 92, 92, 255)
+GOLD = (201, 143, 75, 255)
 
 SIZES = (16, 32, 48, 128)
 # 图形高度占画布的比例，四周留一点边距，工具栏里不会顶到边（字形实际是 793.6×1024，
@@ -37,6 +40,10 @@ PACKET_ICON_PATHS = (
     '-6.08-14.4-9.408-30.272-9.408-46.912 0-10.752 1.408-21.184 4.032-31.104C433.792 608 481.216 569.6 537.6 569.6'
     'c55.04 0 101.504 36.544 116.48 86.72 3.328 11.072 5.12 22.784 5.12 34.88z',
 )
+
+# 三段 path 分工：前两段是红包本体，第三段是中间那枚封口盘。
+BODY_PATHS = PACKET_ICON_PATHS[:2]
+SEAL_PATHS = PACKET_ICON_PATHS[2:]
 
 OUT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'icons'))
 
@@ -134,14 +141,19 @@ def flatten(path):
     return points
 
 
-def render_mask(px):
-    """按目标像素边长画一张灰度遮罩：字形等比铺满高度、横向居中。"""
-    shapes = [flatten(path) for path in PACKET_ICON_PATHS]
-    xs = [point[0] for points in shapes for point in points]
-    ys = [point[1] for points in shapes for point in points]
-    # 图形铺满高度、横向居中；边界直接取自折线，换字形时不必再手工核对数字。
-    origin_x, origin_y = min(xs), min(ys)
-    width, height = max(xs) - origin_x, max(ys) - origin_y
+def glyph_bounds():
+    """整个字形的包围盒（封口盘夹在中间，单看它会把画面撑坏）。"""
+    points = [point for path in PACKET_ICON_PATHS for point in flatten(path)]
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def render_mask(px, paths):
+    """把给定的几段 path 画成 px 见方的灰度遮罩：整个字形等比铺满高度、横向居中。"""
+    # 边界直接取自折线，换字形时不必再手工核对数字。
+    left_x, top_y, right_x, bottom_y = glyph_bounds()
+    width, height = right_x - left_x, bottom_y - top_y
     scale = px * FILL_RATIO / height
     left = (px - width * scale) / 2
     top = (px - height * scale) / 2
@@ -149,21 +161,22 @@ def render_mask(px):
     draw = ImageDraw.Draw(canvas)
 
     def place(point):
-        return (left + (point[0] - origin_x) * scale, top + (point[1] - origin_y) * scale)
+        return (left + (point[0] - left_x) * scale, top + (point[1] - top_y) * scale)
 
-    for points in shapes:
-        # 三片是同一个颜色，逐片填即可，重叠处不必额外做并集。
-        draw.polygon([place(point) for point in points], fill=255)
+    for path in paths:
+        draw.polygon([place(point) for point in flatten(path)], fill=255)
     return canvas
 
 
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
-    master = render_mask(MASTER)
+    body = render_mask(MASTER, BODY_PATHS)
+    seal = render_mask(MASTER, SEAL_PATHS)
     for size in SIZES:
         icon = Image.new('RGBA', (size, size), (0, 0, 0, 0))
-        icon.putalpha(master.resize((size, size), Image.LANCZOS))
-        icon.paste(RED, (0, 0), icon)
+        # 顺序跟面板里的 SVG 一致：先本体，再把金色的封口盘压上去。
+        icon.paste(RED, (0, 0), body.resize((size, size), Image.LANCZOS))
+        icon.paste(GOLD, (0, 0), seal.resize((size, size), Image.LANCZOS))
         path = os.path.join(OUT_DIR, 'icon%d.png' % size)
         icon.save(path, optimize=True)
         print('wrote %s' % path)

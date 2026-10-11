@@ -227,3 +227,17 @@ test('关掉红包卡片后面板还能点', () => {
   assert.ok(host, '样式里缺少 :host 基础规则');
   assert.match(host, /pointer-events: none/, '宿主层没有让开指针事件');
 });
+
+test('历史行红包图标是「主体红 + 封口金」', () => {
+  // 脚本版同处把第三段 path 写成 fill="#eab308"（LINUXDO.md：主体红色且中间圆点金色）。
+  // v0.7.0 复刻成插件时换成了 hb-packet-seal 这个 class，却没补上对应样式，
+  // 历史行那颗图标整颗变成纯红，扩展图标也跟着丢了金色封口，这里守住这条。
+  const panelJs = readFileSync(join(root, 'panel.js'), 'utf8');
+  assert.match(panelJs, /class="hb-packet-seal"/, 'panel.js 没有标记出中间那枚封口盘');
+  const panelCss = readFileSync(join(root, 'panel.css'), 'utf8');
+  assert.match(panelCss, /\.hb-entry-packet \.hb-packet-seal \{[^}]*fill:\s*var\(--hb-gold\)/,
+    '面板没有把封口盘涂成封口金');
+  const tool = readFileSync(join(root, 'tools', 'make-icons.py'), 'utf8');
+  assert.match(tool, /GOLD = \(201, 143, 75, 255\)/, '图标生成脚本里没有封口金');
+  assert.match(tool, /SEAL_PATHS = PACKET_ICON_PATHS\[2:\]/, '图标生成脚本没有把封口盘单独画一层');
+});
