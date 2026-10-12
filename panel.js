@@ -773,18 +773,24 @@
     document.addEventListener('pointerdown', noteTouch, true);
     document.addEventListener('keydown', noteTouch, true);
 
+    let focusing = false;
     const focusField = () => {
+      if (focusing) return false;
       const field = activeField();
       if (!field) return false;
       if (document.activeElement === field) return true;
       // 用户自己点过/按过键之后就不再插手（刚打开时他会点哪儿？——点进来编辑别的控件），
       // 那时焦点是他选的；面板重新露出来时会把这个记录清掉，重新按「刚打开」处理。
       if (userTouched) return false;
+      // window.focus() 可能同步抛出 focus 事件再回到这里，加一道闸免得兜圈。
+      focusing = true;
       try {
         // 侧边栏那边文档未必已经拿到焦点，先向窗口要一次；不接受也不报错，focus() 仍会记账。
         window.focus();
-      } catch { /* 忽略：侧边栏不接受 window.focus */ }
-      field.focus();
+        field.focus();
+      } catch { /* 忽略：侧边栏不接受 window.focus */ } finally {
+        focusing = false;
+      }
       return document.activeElement === field;
     };
 
