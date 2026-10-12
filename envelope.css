@@ -122,6 +122,9 @@ button:focus-visible {
   color: #fae5ae;
   background: #f25542;
   box-shadow: 0 22px 60px rgba(24, 24, 27, 0.3);
+  /* 卡片是打开即出现的展示层，没有「选中」这一说；outline: none 是兜底，
+     免得将来谁再 focus() 它时冒出原站没有的白圈。 */
+  outline: none;
   opacity: 0;
   transform: translateY(12px) scale(0.96);
   transition: opacity 300ms ease, transform 300ms var(--ease-out);
@@ -695,8 +698,6 @@ button:focus-visible {
 @media (max-width: 768px), (max-height: 600px) {
   .envelope-details { overflow-y: auto; overscroll-behavior: contain; }
   #envelope-opened-view > :not(.envelope-claims-list) { flex-shrink: 0; }
-  .envelope-claims-list { min-height: 48px; }
-  .envelope-close-btn { min-height: 55px; }
 }
 
 @media (max-height: 430px) {

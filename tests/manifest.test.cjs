@@ -152,6 +152,25 @@ test('清单的 CSP 放行站点返回的头像图片', () => {
   assert.equal(/script-src[^;]*https?:/.test(csp), false, 'script-src 放行了远程脚本');
 });
 
+test('红包卡片不自带焦点圈，确定按钮也不比原站高', () => {
+  // 打开卡片原本会 node.focus() 卡片本体，浏览器随即给它套上默认焦点圈，
+  // 表现就是「弹出红包窗口后卡片四周多了一圈白边」——原站没这回事。
+  const js = readFileSync(join(root, 'envelope.js'), 'utf8');
+  assert.equal(/node\.focus\(/.test(js), false, '卡片又被自动聚焦了，会出现原站没有的焦点圈');
+  assert.equal(/\.focus\(/.test(js), false, 'envelope.js 里不该有 focus 调用');
+  // 兜底：卡片本体显式关掉 outline。
+  const css = readFileSync(join(root, 'envelope.css'), 'utf8');
+  const cardBlock = css.slice(css.indexOf('.redpacket-envelope {'), css.indexOf('.redpacket-envelope::before'));
+  assert.match(cardBlock, /outline:\s*none/, '卡片本体缺 outline: none 兜底');
+  // 原站窄屏只对：.envelope-details 可滚动 + 结果视图不缩；
+  // 确定按钮的 min-height 与领取列表的 min-height 原站没有，是我们自己加的，去掉。
+  const narrow = css.slice(css.indexOf('@media (max-width: 768px), (max-height: 600px)'));
+  assert.equal(narrow.includes('min-height: 55px'), false, '确定按钮又被垫高到 55px，比原站高');
+  assert.equal(narrow.includes('.envelope-claims-list { min-height: 48px; }'), false, '领取列表又垫了原站没有的高度');
+  const closeRule = css.slice(css.indexOf('.envelope-close-btn {'), css.indexOf('.envelope-close-btn {') + 200);
+  assert.match(closeRule, /min-height:\s*38px/, '确定按钮本体应保持原站的 min-height: 38px');
+});
+
 test('面板按脚本版侧边栏的结构复刻控件', () => {
   // 这一组是脚本版 ensurePanel() 里逐项对应的控件，缺一个都算没复刻。
   const panel = readFileSync(join(root, 'panel.js'), 'utf8');

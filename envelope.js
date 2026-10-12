@@ -693,7 +693,6 @@
     } else {
       renderClosed(state);
     }
-    node.focus({ preventScroll: true });
     // 面板先用手上的快照把卡片摆出来，只读请求回来后再补进同一张卡片。
     const update = (next = {}) => {
       if (state.closed || state.outcome) return;
