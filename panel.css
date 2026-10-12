@@ -1,20 +1,49 @@
 /* 弹出面板与常显侧边栏共用样式。
  *
  * 结构与脚本版侧边栏一一对应（头部开关与图标按钮、可折叠配置、输入区、暂停横幅、历史列表），
- * 配色仍按 docs/AGENTS.md 的莫兰迪色系：脚本版用站点主题变量（--primary/--tertiary 等）上色，
- * 这里换成固定的莫兰迪色值。
+ * 配色取 linux.do 的调色板：脚本版在页面里直接吃站点变量（--primary / --tertiary / --danger …），
+ * 扩展页没有站点可继承，把同一套色值写死在这里，并按 prefers-color-scheme 分亮暗两套。
+ * 变量名与 linux.do 变量的对应关系见 docs/AGENTS.md 的配色规范表。
  */
 :root {
-  --hb-bg: #f3efe8;
-  --hb-card: #fbfaf7;
-  --hb-border: #e5e0d7;
-  --hb-text: #45413b;
-  --hb-text-secondary: #9a917f;
-  --hb-text-tertiary: #b3aa99;
-  --hb-red: #c05c5c;
-  --hb-red-strong: #a94f4f;
-  --hb-gold: #c98f4b;
-  --hb-green: #7e9a7a;
+  color-scheme: light dark;
+  /* 亮色：linux.do 亮色方案 color_definitions_scheme_-1 */
+  --hb-bg: #ffffff;             /* --secondary */
+  --hb-card: #f8f8f8;           /* --primary-very-low */
+  --hb-border: #e9e9e9;         /* --primary-low */
+  --hb-border-strong: #bdbdbd;  /* --primary-low-mid */
+  --hb-text: #222222;           /* --primary */
+  --hb-text-strong: #646464;    /* --primary-high */
+  --hb-text-secondary: #919191; /* --primary-medium */
+  --hb-text-tertiary: #bdbdbd;  /* --primary-low-mid：比 secondary 再弱一档 */
+  --hb-accent: #0088cc;         /* --tertiary */
+  --hb-accent-text: #ffffff;    /* --secondary：压在 --tertiary 上的文字 */
+  --hb-danger: #c80001;         /* --danger */
+  --hb-danger-low: #ffe0e0;     /* --danger-low */
+  --hb-success: #009900;        /* --success */
+  --hb-warn: #e45735;           /* --quaternary：进行中/等待 */
+  --hb-site-red: #dc2626;       /* 脚本版写死的「拆红包」红，不随主题变 */
+  --hb-site-red-strong: #b91c1c;
+}
+
+/* 暗色：linux.do 暗色方案 color_definitions_scheme_105 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --hb-bg: #222222;
+    --hb-card: #282828;
+    --hb-border: #313131;
+    --hb-border-strong: #7a7a7a;
+    --hb-text: #dddddd;
+    --hb-text-strong: #a6a6a6;
+    --hb-text-secondary: #909090;
+    --hb-text-tertiary: #7a7a7a;
+    --hb-accent: #099dd7;
+    --hb-accent-text: #222222;
+    --hb-danger: #e45735;
+    --hb-danger-low: #4f180b;
+    --hb-success: #1ca551;
+    --hb-warn: #c14924;
+  }
 }
 
 * {
@@ -38,10 +67,11 @@ body {
 
 /* 悬浮形态：点扩展图标弹出的面板。窗口高度跟着内容走（脚本版的悬浮面板也是多高就多高），
    历史长到装不下时列表自己滚动，不在下面留一块空的；上限就是浏览器给弹窗的那 600px
-   （内容区留 576px）。宽度 560px 当初是为了在面板里铺开抽奖卡（504 + 两侧 20px 边距）定的，
-   卡片从 v0.9.7 起改在独立窗口里显示，面板这么宽已经不是必需的，先保持现状不动。 */
+   （内容区留 576px）。宽度当初定 560px 是为了在面板里铺开抽奖卡（504 + 两侧 20px 边距）；
+   卡片从 v0.9.7 起搬进独立窗口，面板里再没有需要横向铺开的宽内容，v0.9.11 收到 400px
+   ——头部两个开关加三个图标按钮仍是一行、口令历史一行的结果也不用频繁折行。 */
 body.hb-popup {
-  width: 560px;
+  width: 400px;
 }
 
 body.hb-popup main {
@@ -102,10 +132,10 @@ main {
   line-height: 1.6;
 }
 
+/* 选中的那一段压成站点蓝底白字（脚本版就是 --tertiary / --secondary），不靠加粗提示。 */
 .hb-switch-option.is-active {
-  background: var(--hb-bg);
-  color: var(--hb-text);
-  font-weight: 600;
+  background: var(--hb-accent);
+  color: var(--hb-accent-text);
 }
 
 .hb-icon {
@@ -166,7 +196,7 @@ main {
 .hb-config-version {
   margin-left: auto;
   font-size: 11px;
-  color: var(--hb-text-tertiary);
+  color: var(--hb-text-secondary);
 }
 
 .hb-config-session {
@@ -177,7 +207,7 @@ main {
   width: 5.5em;
   margin: 0;
   padding: 2px 6px;
-  border: 1px solid var(--hb-border);
+  border: 1px solid var(--hb-border-strong);
   border-radius: 5px;
   background: var(--hb-bg);
   color: var(--hb-text);
@@ -185,7 +215,7 @@ main {
 }
 
 .hb-gap:focus {
-  border-color: var(--hb-gold);
+  border-color: var(--hb-accent);
   outline: none;
 }
 
@@ -222,14 +252,17 @@ main {
   cursor: default;
 }
 
+/* 「恢复执行」在脚本版里就是站点自己的默认按钮（<button class="btn btn-small">）：
+   中性底 + 正文字色，不是红框红字。 */
 .hb-resume {
-  border: 1px solid var(--hb-red);
-  color: var(--hb-red);
+  border: 1px solid var(--hb-border);
+  background: var(--hb-border);
+  color: var(--hb-text);
 }
 
 .hb-resume:hover:enabled {
-  background: var(--hb-red);
-  color: #fdfaf6;
+  border-color: var(--hb-border-strong);
+  background: var(--hb-border-strong);
 }
 
 /* ------------------------------- 正文 ------------------------------- */
@@ -255,9 +288,9 @@ main {
   flex: 1;
   margin: 0;
   padding: 6px 8px;
-  border: 1px solid var(--hb-border);
+  border: 1px solid var(--hb-border-strong);
   border-radius: 5px;
-  background: var(--hb-card);
+  background: var(--hb-bg);
   color: var(--hb-text);
   font: inherit;
 }
@@ -267,7 +300,7 @@ main {
 }
 
 .hb-input:focus {
-  border-color: var(--hb-gold);
+  border-color: var(--hb-accent);
   outline: none;
 }
 
@@ -294,15 +327,15 @@ main {
   padding: 5px 14px;
   border: 0;
   border-radius: 5px;
-  background: var(--hb-red);
-  color: #fdfaf6;
+  background: var(--hb-site-red);
+  color: #fff;
   font: inherit;
   line-height: 1.4;
   cursor: pointer;
 }
 
 .hb-submit:hover:enabled {
-  background: var(--hb-red-strong);
+  background: var(--hb-site-red-strong);
 }
 
 .hb-submit:disabled {
@@ -312,19 +345,21 @@ main {
 
 .hb-count {
   margin-left: auto;
-  color: var(--hb-text-tertiary);
+  color: var(--hb-text-secondary);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 
+/* 暂停横幅照脚本版是一枚圆角药丸：danger-low 底 + danger 字，不是左边一条红杠。 */
 .hb-paused {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  padding: 4px 0 4px 8px;
-  border-left: 3px solid var(--hb-red);
-  color: var(--hb-red);
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--hb-danger-low);
+  color: var(--hb-danger);
   font-size: 12px;
 }
 
@@ -375,7 +410,7 @@ body.hb-popup .hb-list {
 
 .hb-list:hover,
 .hb-list:focus-within {
-  scrollbar-color: var(--hb-text-tertiary) transparent;
+  scrollbar-color: var(--hb-text-secondary) transparent;
 }
 
 .hb-list::-webkit-scrollbar {
@@ -397,7 +432,12 @@ body.hb-popup .hb-list {
 
 .hb-list:hover::-webkit-scrollbar-thumb,
 .hb-list:focus-within::-webkit-scrollbar-thumb {
-  background-color: var(--hb-text-tertiary);
+  background-color: var(--hb-text-secondary);
+}
+
+.hb-list:hover::-webkit-scrollbar-thumb:hover,
+.hb-list:focus-within::-webkit-scrollbar-thumb:hover {
+  background-color: var(--hb-text-strong);
 }
 
 .hb-entry {
@@ -426,16 +466,16 @@ body.hb-popup .hb-list {
 }
 
 .hb-time--done {
-  color: var(--hb-green);
+  color: var(--hb-success);
 }
 
 .hb-time--failed {
-  color: var(--hb-red);
+  color: var(--hb-danger);
 }
 
 .hb-time--awaiting,
 .hb-time--running {
-  color: var(--hb-gold);
+  color: var(--hb-warn);
 }
 
 .hb-time--void {
@@ -473,7 +513,7 @@ body.hb-popup .hb-list {
   border: 0;
   background: transparent;
   /* 这枚红包字形是站点的品牌图形（跟红包卡片同一类），配色照脚本版写死：
-   * 主体 #dc2626、悬停 #b91c1c，不套面板的莫兰迪红——套上去比脚本版淡一截。 */
+   * 主体 #dc2626、悬停 #b91c1c，不套面板自身的界面红——套上去比脚本版淡一截。 */
   color: #dc2626;
   font: inherit;
   line-height: inherit;
@@ -515,7 +555,8 @@ body.hb-popup .hb-list {
 
 .hb-entry-void:hover,
 .hb-entry-delete:hover {
-  border-color: var(--hb-text-tertiary);
+  border-color: var(--hb-border-strong);
+  background: var(--hb-border);
   color: var(--hb-text);
 }
 
@@ -532,11 +573,11 @@ body.hb-popup .hb-list {
 }
 
 .hb-entry-line[data-tone="success"] {
-  color: var(--hb-green);
+  color: var(--hb-success);
 }
 
 .hb-entry-line[data-tone="error"] {
-  color: var(--hb-red);
+  color: var(--hb-danger);
 }
 
 .hb-entry-line[data-tone="muted"] {

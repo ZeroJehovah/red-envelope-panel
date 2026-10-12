@@ -374,7 +374,7 @@ test('关掉红包卡片后面板还能点', () => {
 
 test('历史行红包图标与脚本版同色（主体红 + 封口金）', () => {
   // 脚本版同处写死 color:#dc2626、:hover #b91c1c，第三段 path 写死 fill="#eab308"
-  // （LINUXDO.md：主体红色且中间圆点金色）。面板照搬这三个站点色，不套莫兰迪红金——
+  // （LINUXDO.md：主体红色且中间圆点金色）。面板照搬这三个站点色，不套面板自身的界面红金——
   // 这枚字形是站点品牌图形，套上面板配色会比脚本版淡一截。v0.7.0 复刻成插件时把它换成了
   // hb-packet-seal 这个 class、却没补上对应样式，历史行那颗图标一度整颗变成纯红，
   // 扩展图标也跟着丢了金色封口，这里守住这条。
@@ -394,4 +394,69 @@ test('历史行红包图标与脚本版同色（主体红 + 封口金）', () =>
   assert.match(tool, /RED = \(220, 38, 38, 255\)/, '图标生成脚本的主体红与脚本版不一致');
   assert.match(tool, /GOLD = \(234, 179, 8, 255\)/, '图标生成脚本的封口金与脚本版不一致');
   assert.match(tool, /SEAL_PATHS = PACKET_ICON_PATHS\[2:\]/, '图标生成脚本没有把封口盘单独画一层');
+});
+
+test('面板配色改用脚本版的站点调色板（亮/暗两套），弹窗宽度收窄', () => {
+  // v0.9.11：面板原先是一套莫兰迪配色，跟脚本版（直接吃 linux.do 的 --primary / --tertiary /
+  // --danger …）不是一个观感。扩展页没有站点可继承，就把 linux.do 亮色方案
+  // （color_definitions_scheme_-1）与暗色方案（_105）里的色值写死进 panel.css，
+  // 并按 prefers-color-scheme 分两套——脚本版跟着站点主题走，插件得自己分。
+  const css = readFileSync(join(root, 'panel.css'), 'utf8');
+  // 注释里会讲到「以前是 560px」「以前用莫兰迪红」这类历史，比较色值前先把注释剥掉。
+  const rules = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const value = (block, name) => {
+    const found = new RegExp(name + ':\\s*([^;]+);').exec(block);
+    assert.ok(found, 'panel.css 里缺少 ' + name);
+    return found[1].trim();
+  };
+  const light = /:root \{([^}]*)\}/.exec(css);
+  const dark = /@media \(prefers-color-scheme: dark\) \{\s*:root \{([^}]*)\}/.exec(css);
+  assert.ok(light, 'panel.css 里缺少 :root 调色板');
+  assert.ok(dark, '面板没有按系统主题分暗色一套');
+  assert.match(css, /color-scheme: light dark;/, '没有声明 color-scheme，表单控件与滚动条不会跟着换主题');
+
+  // 亮色：--secondary / --primary / --tertiary / --danger / --success …
+  assert.equal(value(light[1], '--hb-bg'), '#ffffff', '亮色面板底色不是 linux.do 的 --secondary');
+  assert.equal(value(light[1], '--hb-card'), '#f8f8f8', '亮色次级容器底不是 --primary-very-low');
+  assert.equal(value(light[1], '--hb-border'), '#e9e9e9', '亮色分隔线不是 --primary-low');
+  assert.equal(value(light[1], '--hb-border-strong'), '#bdbdbd', '亮色控件描边不是 --primary-low-mid');
+  assert.equal(value(light[1], '--hb-text'), '#222222', '亮色正文不是 --primary');
+  assert.equal(value(light[1], '--hb-text-secondary'), '#919191', '亮色次要文字不是 --primary-medium');
+  assert.equal(value(light[1], '--hb-accent'), '#0088cc', '亮色强调色不是 --tertiary');
+  assert.equal(value(light[1], '--hb-danger'), '#c80001', '亮色失败色不是 --danger');
+  assert.equal(value(light[1], '--hb-danger-low'), '#ffe0e0', '亮色失败底色不是 --danger-low');
+  assert.equal(value(light[1], '--hb-success'), '#009900', '亮色成功色不是 --success');
+
+  // 暗色：同一批语义换 _105 方案的值。
+  assert.equal(value(dark[1], '--hb-bg'), '#222222', '暗色面板底色不是 linux.do 暗色 --secondary');
+  assert.equal(value(dark[1], '--hb-border'), '#313131', '暗色分隔线不是暗色 --primary-low');
+  assert.equal(value(dark[1], '--hb-text'), '#dddddd', '暗色正文不是暗色 --primary');
+  assert.equal(value(dark[1], '--hb-accent'), '#099dd7', '暗色强调色不是暗色 --tertiary');
+  assert.equal(value(dark[1], '--hb-danger'), '#e45735', '暗色失败色不是暗色 --danger');
+  assert.equal(value(dark[1], '--hb-success'), '#1ca551', '暗色成功色不是暗色 --success');
+
+  // 旧调色板的色值一个都不该留下，配套的变量名也不该再被引用——变量删了而规则还在，
+  // 浏览器会把整条声明当无效值丢掉，颜色会静默变成继承色。
+  for (const hex of ['#f3efe8', '#fbfaf7', '#e5e0d7', '#45413b', '#9a917f', '#b3aa99',
+    '#c05c5c', '#c98f4b', '#7e9a7a', '#fdfaf6']) {
+    assert.equal(rules.includes(hex), false, 'panel.css 里还留着旧调色板的 ' + hex);
+  }
+  for (const name of ['--hb-red', '--hb-gold', '--hb-green']) {
+    assert.equal(rules.includes('var(' + name + ')'), false, 'panel.css 里还在用已删掉的 ' + name);
+  }
+
+  // 与脚本版逐条对齐的几处：选中段是站点蓝底白字、暂停横幅是 danger 药丸、
+  // 「拆红包」照脚本版写死的站点红（不跟主题走）。
+  assert.match(css, /\.hb-switch-option\.is-active \{[^}]*background: var\(--hb-accent\);/,
+    '选中的开关段不是站点的 --tertiary 底');
+  assert.match(css, /\.hb-paused \{[^}]*background: var\(--hb-danger-low\);[^}]*color: var\(--hb-danger\);/,
+    '暂停横幅不是脚本版那枚 danger-low 药丸');
+  assert.match(css, /\.hb-submit \{[^}]*background: var\(--hb-site-red\)/,
+    '「拆红包」不是脚本版写死的站点红');
+
+  // 面板宽度按内容收窄：卡片从 v0.9.7 起在独立窗口里，面板再不需要 560px。
+  const popup = /body\.hb-popup \{[^}]*\}/.exec(css);
+  assert.ok(popup, '面板样式里缺少弹出面板外壳规则');
+  assert.match(popup[0], /width: 400px;/, '弹出面板宽度没有收窄到 400px');
+  assert.equal(/560px/.test(rules), false, 'panel.css 里还留着为卡片铺开的 560px');
 });
