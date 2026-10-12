@@ -410,11 +410,17 @@ test('打开面板就把焦点放进输入框', () => {
   const panel = readFileSync(join(root, 'panel.js'), 'utf8');
   assert.match(panel, /const focusField = \(\) => \{/, '没有放焦点的动作');
   assert.match(panel, /refresh\(\)\.finally\(focusField\)/, '第一次渲染完没有把焦点放进输入框');
-  assert.match(panel, /activeField\(\)\?\.focus\(\)/, '没有按当前模式选单个输入框或批量文本域');
+  assert.match(panel, /const field = activeField\(\);/, '没有按当前模式选单个输入框或批量文本域');
+  // 侧边栏是 Chrome 晚一步把焦点交过来的（还可能先落在面板里别的元素上），放一次不保险。
+  assert.match(panel, /for \(const delay of \[60, 200, 450, 900, 1600\]\)/, '没盖住侧边栏交焦点的窗口期');
+  assert.match(panel, /window\.addEventListener\('focus', \(\) => \{ focusField\(\); \}\)/, '窗口拿到焦点时没有补一次');
   assert.match(panel, /document\.addEventListener\('visibilitychange'/, '侧边栏再露出来时没有补一次焦点');
-  assert.match(panel, /if \(document\.visibilityState === 'visible'\) focusField\(\)/);
-  // 已经在别的控件上编辑（比如正在改间隔时间）就不抢。
-  assert.match(panel, /if \(active && active !== document\.body\) return;/);
+  assert.match(panel, /if \(document\.visibilityState === 'visible'\)/, '露出来时没有补一次焦点');
+  // 用户自己动过键盘鼠标就不插手（焦点是他选的）；面板重新露出来时清掉这个记录，重新按刚打开处理。
+  assert.match(panel, /document\.addEventListener\('pointerdown', noteTouch, true\)/, '没有记录用户是否自己动过');
+  assert.match(panel, /if \(userTouched\) return false;/, '用户动过之后还在抢焦点');
+  assert.match(panel, /userTouched = false;\s*\n\s*if \(document\.visibilityState === 'visible'\) focusField\(\);/,
+    '重新露出来时没有清掉「用户动过」的记录并补一次焦点');
 });
 
 test('关掉红包卡片后面板还能点', () => {

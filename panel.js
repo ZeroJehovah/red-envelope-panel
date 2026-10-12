@@ -763,17 +763,47 @@
     // （图标点击交给浏览器接管），悬浮＝点图标弹面板。所以侧边栏这边**不再**在挂载或收起时
     // 改写它——手动把侧边栏关掉不该改掉这个选择，下次点图标还是它。
 
-    // 打开就把焦点放进输入框（弹出面板与常显侧边栏一样），省掉一次点击。第一次渲染之后才
-    // 知道用户是单个还是批量，所以等它回来再放；面板里已经有焦点（比如正在改间隔时间）就不抢。
+    // 打开就把焦点放进输入框（弹出面板与常显侧边栏一样），省掉一次点击。两个外壳的交焦点时序
+    // 不一样：弹出面板一打开就是自己的窗口，焦点说到就到；侧边栏是 Chrome 把面板挂进窗口右侧
+    // 之后才交焦点，有时还先落在面板里别的元素（甚至空的 body）上。所以这里不是放一次就算——
+    // 刚挂载时补几次，面板重新露出来（visibilitychange）或窗口拿到焦点时也补一次。用户在面板
+    // 里动过键盘鼠标（焦点是他自己选的）之后就不再插手，直到面板被收起来再打开。
+    let userTouched = false;
+    const noteTouch = () => { userTouched = true; };
+    document.addEventListener('pointerdown', noteTouch, true);
+    document.addEventListener('keydown', noteTouch, true);
+
     const focusField = () => {
-      const active = document.activeElement;
-      if (active && active !== document.body) return;
-      activeField()?.focus();
+      const field = activeField();
+      if (!field) return false;
+      if (document.activeElement === field) return true;
+      // 用户自己点过/按过键之后就不再插手（刚打开时他会点哪儿？——点进来编辑别的控件），
+      // 那时焦点是他选的；面板重新露出来时会把这个记录清掉，重新按「刚打开」处理。
+      if (userTouched) return false;
+      try {
+        // 侧边栏那边文档未必已经拿到焦点，先向窗口要一次；不接受也不报错，focus() 仍会记账。
+        window.focus();
+      } catch { /* 忽略：侧边栏不接受 window.focus */ }
+      field.focus();
+      return document.activeElement === field;
     };
-    // 侧边栏被浏览器藏起来再露出来时页面不会重新加载，这一跳靠 visibilitychange 补上。
+
+    // 第一次渲染回来才知道用户是单个还是批量，所以 refresh 结束时放第一次；侧边栏的交焦点比
+    // 页面加载晚，再补几次把这个窗口期盖住。
+    const focusRetries = [];
+    for (const delay of [60, 200, 450, 900, 1600]) {
+      focusRetries.push(setTimeout(() => {
+        if (focusField()) focusRetries.forEach((timer) => clearTimeout(timer));
+      }, delay));
+    }
+    // 侧边栏被藏起来再露出来时页面不会重新加载，这一跳就是「又被打开了一次」：不管上回焦点
+    // 落在哪儿都把光标放回输入框，同时清掉「用户动过」的记录。
     document.addEventListener('visibilitychange', () => {
+      userTouched = false;
       if (document.visibilityState === 'visible') focusField();
     });
+    // 侧边栏那边的焦点是 Chrome 晚一步交过来的，窗口真正拿到焦点时再确认一次。
+    window.addEventListener('focus', () => { focusField(); });
 
     const refresh = async () => {
       try {
