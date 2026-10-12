@@ -382,17 +382,39 @@ test('卡片样式先到位再画，避免无样式一闪', () => {
   assert.ok(existsSync(join(root, 'envelope.css')), '卡片样式不再是随包的一份文件');
 });
 
-test('停靠/悬浮开关跟着实际形态走', () => {
-  // 开关显示的形态必须和眼前实际形态一致：侧边栏在就是停靠，侧边栏收了就回悬浮。
+test('显示方式是用户的持久选择，点图标去哪由它决定', () => {
   const panel = readFileSync(join(root, 'panel.js'), 'utf8');
-  assert.match(panel, /patchSettings\(\{ display: 'sidebar' \}\);/, '侧边栏挂载时没有把设置对齐成停靠');
-  assert.match(panel, /const wanted = docked \? 'sidebar' : 'panel';/, '缺少停靠/悬浮的对照表');
-  assert.match(panel, /window\.addEventListener\('pagehide'/, '侧边栏收起（页面销毁）时没有回收');
-  assert.match(panel, /document\.addEventListener\('visibilitychange'/, '侧边栏被藏起来时没有回收');
-  assert.match(panel, /setTimeout\(\(\) => \{ patchSettings\(\{ display: 'sidebar' \}\); \}, 400\);/,
-    '侧边栏里切悬浮却收不掉时没有改回停靠');
-  // 弹出面板一侧的既有行为：切停靠要拉起侧边栏并收起自己。
+  const background = readFileSync(join(root, 'background.js'), 'utf8');
+  // 侧边栏不再把眼前的形态写回设置：手动关掉侧边栏不该改掉这个选择，下次点图标还是它。
+  assert.equal(/patchSettings\(\{ display: 'sidebar' \}\)/.test(panel), false,
+    '侧边栏还在把显示方式改成停靠');
+  assert.equal(/pagehide/.test(panel), false, '侧边栏收起时还在改写显示方式');
+  assert.equal(/markDocked/.test(panel), false, '还留着「跟着实际形态走」的对照表');
+  // 开关本身还在：弹出面板里切停靠要拉起侧边栏并收起自己。
+  assert.match(panel, /patchSettings\(\{ display: next === 'dock' \? 'sidebar' : 'panel' \}\)/);
   assert.match(panel, /if \(isPopup\) \{\n          openSidebar\(\);/);
+  // 图标点击的去向只有后台改得了：停靠＝图标交给侧边栏开合并清掉 popup，悬浮＝弹出 popup。
+  assert.match(background, /sidePanel\?\.setPanelBehavior\?\.\(\{ openPanelOnActionClick: docked \}\)/,
+    '没有把图标点击交给侧边栏');
+  assert.match(background, /action\?\.setPopup\?\.\(\{ popup: docked \? '' : 'popup\.html' \}\)/,
+    '没有按显示方式开关 popup');
+  assert.match(background, /await syncActionMode\(\);/, '设置变更后没有同步图标行为');
+  assert.match(background, /^syncActionMode\(\)\.catch/m, 'worker 起来时没有重放图标行为');
+  // popup 仍然声明在清单里：悬浮模式回到它就是靠它。
+  assert.match(readFileSync(join(root, 'manifest.json'), 'utf8'), /"default_popup": "popup\.html"/);
+});
+
+test('打开面板就把焦点放进输入框', () => {
+  // 弹出面板与常显侧边栏一打开就能直接打字，省掉一次点击；形态变化（侧边栏被藏起来再
+  // 露出来）也补一次，但正在别处编辑时不抢焦点。
+  const panel = readFileSync(join(root, 'panel.js'), 'utf8');
+  assert.match(panel, /const focusField = \(\) => \{/, '没有放焦点的动作');
+  assert.match(panel, /refresh\(\)\.finally\(focusField\)/, '第一次渲染完没有把焦点放进输入框');
+  assert.match(panel, /activeField\(\)\?\.focus\(\)/, '没有按当前模式选单个输入框或批量文本域');
+  assert.match(panel, /document\.addEventListener\('visibilitychange'/, '侧边栏再露出来时没有补一次焦点');
+  assert.match(panel, /if \(document\.visibilityState === 'visible'\) focusField\(\)/);
+  // 已经在别的控件上编辑（比如正在改间隔时间）就不抢。
+  assert.match(panel, /if \(active && active !== document\.body\) return;/);
 });
 
 test('关掉红包卡片后面板还能点', () => {

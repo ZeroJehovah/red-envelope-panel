@@ -777,6 +777,34 @@ async function handleSubmit(message) {
   return { ok: true, added: created.length, state: snapshot() };
 }
 
+/* ------------------------------ 图标点击去向 ------------------------------ */
+
+// 「显示方式」是用户的持久选择（settings.display），它同时决定点扩展图标会发生什么：
+//   - 停靠（'sidebar'）：图标点击交给浏览器开合侧边栏，popup 清空；
+//   - 悬浮（'panel'）：图标点击弹出清单里的 popup。
+// 这两件事只有后台改得了，面板那边看不见结果，所以后台在「设置变更后」与「worker 起来时」
+// 各重放一次——浏览器会把它们记在扩展自己的偏好里（重载扩展又会回到清单默认值）。
+let actionModeSynced = null;
+
+async function syncActionMode() {
+  const loaded = await getState();
+  const docked = loaded.settings.display === 'sidebar';
+  if (actionModeSynced === docked) return;
+  actionModeSynced = docked;
+  try {
+    // 停靠时点图标＝开合侧边栏；悬浮时必须关掉它，否则图标点击会被它截走。
+    await api.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: docked });
+  } catch (error) {
+    console.warn('[红包口令面板] 侧边栏图标行为设置失败', error);
+  }
+  try {
+    // 空字符串＝图标不带 popup（点击交给侧边栏）；悬浮时恢复清单里的那一页。
+    await api.action?.setPopup?.({ popup: docked ? '' : 'popup.html' });
+  } catch (error) {
+    console.warn('[红包口令面板] 图标弹窗开关设置失败', error);
+  }
+}
+
 // 消息契约（扩展页面 → 后台）。
 // hb:ping         → { ok, version }
 // hb:state:get    → { ok, state }
@@ -801,6 +829,8 @@ async function handleMessage(message) {
         state.settings = normalizeSettings({ ...state.settings, ...patch.settings });
       }
       await commit();
+      // 显示方式变了就同步图标点击的去向（没变的话 syncActionMode 自己会跳过）。
+      await syncActionMode();
       return { ok: true, state: snapshot() };
     }
     case 'hb:submit':
@@ -845,11 +875,16 @@ api.runtime.onInstalled.addListener(() => {
   return api.storage.local.get(STATE_KEY).then((bag) => {
     if (isPlainObject(bag?.[STATE_KEY])) return undefined;
     return api.storage.local.set({ [STATE_KEY]: emptyState() });
-  }).then(() => tick());
+  }).then(async () => {
+    // 重载扩展会把图标行为打回清单默认值，装完按存储里的选择补一次。
+    await syncActionMode();
+    return tick();
+  });
 });
 
 api.runtime.onStartup?.addListener(() => {
   scheduleTick();
+  syncActionMode().catch(() => {});
 });
 
 api.alarms?.onAlarm.addListener((alarm) => {
@@ -858,4 +893,6 @@ api.alarms?.onAlarm.addListener((alarm) => {
 
 // worker 每次被唤醒都可能是在队列中途：先载入状态，把该跑的接着跑。
 scheduleTick();
+// 图标点击的去向也随 worker 唤醒重放一次（设置变了、或浏览器把偏好忘了都会在这里补上）。
+syncActionMode().catch(() => {});
 

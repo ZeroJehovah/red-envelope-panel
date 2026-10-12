@@ -202,6 +202,10 @@
           await tick();
           await tick();
 
+          // 打开就把焦点放进输入框（弹出面板与常显侧边栏一样），省掉一次点击。
+          check('打开面板焦点落在输入框', document.activeElement === input(),
+            String(document.activeElement && (document.activeElement.id || document.activeElement.tagName)));
+
           // 面板里不该有脚本版侧边栏没有的常驻提示区（底部那行整个删掉了）。
           check('面板没有 #hb-hint 元素', document.getElementById('hb-hint') === null);
           check('面板没有 .hb-hint 提示行', document.querySelector('.hb-hint') === null);
@@ -467,6 +471,21 @@
           check('数字模式可切回文本', document.querySelector('[data-switch="charset"]').getAttribute('aria-checked') === 'false');
           type(input(), 'abc12');
           check('短口令禁用提交', submit().disabled === true && /不足 6 个字符/.test(submit().title), submit().title);
+
+          // 焦点：已经在别的控件上编辑（这里是间隔时间）时不抢，没焦点时才补一次。
+          gap().focus();
+          document.dispatchEvent(new Event('visibilitychange'));
+          check('形态变化不抢正在编辑的控件焦点', document.activeElement === gap(),
+            String(document.activeElement && document.activeElement.id));
+          document.activeElement.blur();
+          document.dispatchEvent(new Event('visibilitychange'));
+          check('侧边栏再露出来时把焦点补回输入框', document.activeElement === input(),
+            String(document.activeElement && document.activeElement.id));
+          // 批量模式下的输入框是文本域，焦点跟着模式走。
+          click(document.querySelector('[data-switch="batch"]'));
+          await tick();
+          check('批量模式下焦点落在批量输入框', document.activeElement === textarea(),
+            String(document.activeElement && document.activeElement.id));
         } catch (error) {
           failed.push('FAIL 抛出异常 → ' + String(error && error.stack || error));
         }

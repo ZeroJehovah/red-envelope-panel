@@ -137,6 +137,9 @@
   // 配置面板的展开状态只活在本次会话。
   let lastState = null;
   let configOpen = false;
+  // 单个/批量切换后要把焦点放到换过来的那个输入框，可它此时还藏着的显隐由下一轮渲染决定，
+  // 所以先记一笔，等渲染完（输入框换过来、settings 也跟上了）再放。
+  let pendingFieldFocus = false;
 
   // 面板里没有全局提示区（脚本版侧边栏也没有）：领取/参与/查询的结果都写在历史行里，
   // 队列出错走「执行已暂停」横幅，登录检查的结果写在配置面板的「红包站：」一行。
@@ -334,11 +337,17 @@
     const claimSwitch = document.querySelector('[data-switch="claimMode"]');
     batchSwitch.title = batch ? '当前批量模式，点击切换单个' : '当前单个模式，点击切换批量';
     charsetSwitch.title = charset === 'numeric' ? '当前数字模式，点击切换文本' : '当前文本模式，点击切换数字';
-    displaySwitch.title = displayMode(settings) === 'dock' ? '当前停靠显示，点击切换悬浮' : '当前悬浮显示，点击切换停靠';
+    displaySwitch.title = displayMode(settings) === 'dock'
+      ? '停靠：点图标开合侧边栏，点击改回悬浮弹窗'
+      : '悬浮：点图标弹出面板，点击改为侧边栏常显';
     claimSwitch.title = (settings.claimMode === 'direct' ? '当前协议：直接领取；点击切换古法' : '当前古法：弹窗手动开启；点击切换协议')
       + '。对之后提交的口令生效';
 
     syncDraft();
+    if (pendingFieldFocus) {
+      pendingFieldFocus = false;
+      activeField()?.focus();
+    }
   }
 
   // settings.display 存的是 'panel'（点图标弹出）或 'sidebar'（常显侧边栏），界面上叫悬浮/停靠。
@@ -653,7 +662,7 @@
       const next = settings.batch !== true;
       moveDraftToMode(next);
       patchSettings({ batch: next });
-      activeField()?.focus();
+      pendingFieldFocus = true;
     });
     document.querySelector('[data-switch="charset"]').addEventListener('click', () => {
       const next = settings.charset === 'numeric' ? 'text' : 'numeric';
@@ -668,20 +677,19 @@
     });
     document.querySelector('[data-switch="display"]').addEventListener('click', () => {
       const next = displayMode(settings) === 'dock' ? 'float' : 'dock';
+      // 显示方式是用户的选择，写下来就行：后台按它决定点图标是开合侧边栏还是弹面板。
+      // 这里顺带把眼前的形态也换成选的那个。
       patchSettings({ display: next === 'dock' ? 'sidebar' : 'panel' });
       if (next === 'dock') {
-        // 切到停靠：弹出面板里直接拉起侧边栏并收起自己。
+        // 切到停靠：弹出面板里直接拉起侧边栏并收起自己（图标点击从此刻起交给侧边栏）。
         if (isPopup) {
           openSidebar();
         }
         return;
       }
-      // 切回悬浮：侧边栏里把自己收起来，开关才不会和实际形态对不上。
+      // 切回悬浮：常显侧边栏把自己收起来（收不掉也不改设置——选择是用户的，形态只是外壳）。
       if (!isPopup) {
         window.close();
-        // 万一这个浏览器不让侧边栏自收，页面还活着，就按实际形态改回停靠；
-        // 收掉了的话这里随页面一起没了，不会把设置又写回去。
-        setTimeout(() => { patchSettings({ display: 'sidebar' }); }, 400);
       }
     });
 
@@ -750,21 +758,22 @@
 
     if (isPopup) {
       rememberWindowId();
-    } else {
-      // 进到侧边栏这一形态就把它记成「停靠」（浏览器侧边栏菜单里手动打开也算），
-      // 免得开关显示的形态和眼前实际形态不一致。
-      patchSettings({ display: 'sidebar' });
-      // 侧边栏被收起（页面被销毁或切换走）时「停靠」就不成立了，把设置切回「悬浮」；
-      // 再露出来时记回「停靠」。只在真的变了时才写，省掉多余的存储写入。
-      const markDocked = (docked) => {
-        const wanted = docked ? 'sidebar' : 'panel';
-        if (settings.display !== wanted) patchSettings({ display: wanted });
-      };
-      window.addEventListener('pagehide', () => markDocked(false));
-      document.addEventListener('visibilitychange', () => {
-        markDocked(document.visibilityState === 'visible');
-      });
     }
+    // v0.10.0 起「显示方式」是用户的选择，而不是当前形态的镜像：停靠＝点图标去开合侧边栏
+    // （图标点击交给浏览器接管），悬浮＝点图标弹面板。所以侧边栏这边**不再**在挂载或收起时
+    // 改写它——手动把侧边栏关掉不该改掉这个选择，下次点图标还是它。
+
+    // 打开就把焦点放进输入框（弹出面板与常显侧边栏一样），省掉一次点击。第一次渲染之后才
+    // 知道用户是单个还是批量，所以等它回来再放；面板里已经有焦点（比如正在改间隔时间）就不抢。
+    const focusField = () => {
+      const active = document.activeElement;
+      if (active && active !== document.body) return;
+      activeField()?.focus();
+    };
+    // 侧边栏被浏览器藏起来再露出来时页面不会重新加载，这一跳靠 visibilitychange 补上。
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') focusField();
+    });
 
     const refresh = async () => {
       try {
@@ -782,7 +791,7 @@
       if (area === 'local' && changes[STATE_KEY]) refresh();
     });
 
-    refresh();
+    refresh().finally(focusField);
     return { refresh };
   }
 

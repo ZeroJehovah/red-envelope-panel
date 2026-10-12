@@ -91,6 +91,9 @@ async function createEnv({ stored = null, handler } = {}) {
   const listeners = { message: [], alarm: [] };
   const requests = [];
   const alarms = new Map();
+  // 图标点击去向的两项设置：setPanelBehavior 决定点图标开合侧边栏，setPopup 决定要不要弹 popup。
+  const panelBehavior = [];
+  const popups = [];
   let timerSeq = 0;
 
   const chrome = {
@@ -113,6 +116,12 @@ async function createEnv({ stored = null, handler } = {}) {
       create: async (name, info) => { alarms.set(name, info); },
       clear: async (name) => alarms.delete(name),
       onAlarm: { addListener: (fn) => listeners.alarm.push(fn) },
+    },
+    sidePanel: {
+      setPanelBehavior: async (behavior) => { panelBehavior.push(JSON.parse(JSON.stringify(behavior))); },
+    },
+    action: {
+      setPopup: async (options) => { popups.push(JSON.parse(JSON.stringify(options))); },
     },
   };
 
@@ -165,6 +174,8 @@ async function createEnv({ stored = null, handler } = {}) {
     clock,
     requests,
     alarms,
+    panelBehavior,
+    popups,
     listeners,
     async send(message) {
       return new Promise((resolve) => {
@@ -702,5 +713,42 @@ test('重载已报名的抽奖只重新装看护，不重复报名', async () =>
   const after = await env.send({ type: 'hb:state:get' });
   assert.equal(after.state.entries[0].status, 'done');
   assert.equal(after.state.entries[0].result, '未抽中');
+});
+
+test('停靠/悬浮决定点图标做什么：后台按显示方式切侧边栏行为与 popup', async () => {
+  const env = await createEnv({ handler: okQuery({ error: '口令不存在' }) });
+  // 默认悬浮：popup 留着，图标点击不归侧边栏。
+  assert.deepEqual(plain(env.panelBehavior), [{ openPanelOnActionClick: false }]);
+  assert.deepEqual(plain(env.popups), [{ popup: 'popup.html' }]);
+
+  await env.send({ type: 'hb:state:patch', patch: { settings: { display: 'sidebar' } } });
+  await env.flush();
+  assert.deepEqual(plain(env.panelBehavior), [
+    { openPanelOnActionClick: false },
+    { openPanelOnActionClick: true },
+  ], '切到停靠没有把图标点击交给侧边栏');
+  assert.deepEqual(plain(env.popups), [{ popup: 'popup.html' }, { popup: '' }],
+    '切到停靠没有清掉 popup');
+
+  // 别的设置改动不该重放（图标行为只跟显示方式有关）。
+  await env.send({ type: 'hb:state:patch', patch: { settings: { gapExtraMs: 1000 } } });
+  await env.flush();
+  assert.equal(env.popups.length, 2, '显示方式没变却又写了一次图标设置');
+
+  await env.send({ type: 'hb:state:patch', patch: { settings: { display: 'panel' } } });
+  await env.flush();
+  assert.deepEqual(plain(env.panelBehavior).at(-1), { openPanelOnActionClick: false }, '切回悬浮没把侧边栏关掉');
+  assert.deepEqual(plain(env.popups).at(-1), { popup: 'popup.html' }, '切回悬浮没恢复 popup');
+});
+
+test('worker 起来就按存储里的显示方式重放图标行为', async () => {
+  // 扩展被重载时浏览器会把图标行为打回清单默认值，存储里的选择要在 worker 起来时补回来。
+  const env = await createEnv({
+    stored: { entries: [], removed: [], settings: { display: 'sidebar' }, paused: false, pausedReason: '', lastFinishedAt: 0 },
+    handler: okQuery({ error: '口令不存在' }),
+  });
+  await env.flush();
+  assert.deepEqual(plain(env.panelBehavior), [{ openPanelOnActionClick: true }], '唤醒后没有把图标交给侧边栏');
+  assert.deepEqual(plain(env.popups), [{ popup: '' }], '唤醒后没有清掉 popup');
 });
 
