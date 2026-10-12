@@ -9,6 +9,7 @@
        card-harness.html?id=hp2        抽奖红包（未报名）
        card-harness.html?id=hp3        已领取完的历史红包
        card-harness.html?id=hp4        已领完且自己没领到（金额显示 0.00）
+       card-harness.html?id=hp5        后台内存里没有、要等一次只读查询（先看 loading）
        card-harness.html?id=missing    条目不在时的兜底说明
 
      无头运行示例（窗口至少 424×668，卡片才铺到原尺寸 384×624）：
@@ -24,6 +25,10 @@
     <link rel="stylesheet" href="card.css" />
   </head>
   <body>
+    <main id="hb-card-loading" role="status">
+      <div class="hb-card-spinner" aria-hidden="true"></div>
+      <p>正在读取红包详情…</p>
+    </main>
     <main id="hb-card-error" hidden></main>
     <pre id="harness-result">running</pre>
     <script>
@@ -69,6 +74,11 @@
             { share_id: 15143, username: 'Yueby', linuxdo_id: 217875, avatar_url: 'https://cdn.ldstatic.com/user_avatar/linux.do/yueby/288/1499203_2.png', amount: 25.31, at: 4 },
           ],
         },
+        hp5: {
+          id: 'hp5', type: 'random', status: 'exhausted', code: '80146763', wish: '恭喜发财，大吉大利',
+          creator: { username: 'alice', linuxdo_id: 1 }, count: 5, claimed_count: 2, claimed_amount: 1.23,
+          mine: 1.23, claims: [{ share_id: 7, username: 'carol', amount: 1.23, at: 2 }],
+        },
       };
       const state = {
         entries: [
@@ -96,6 +106,12 @@
             packet: { id: 'hp4', type: 'random', status: 'exhausted', code: '80146763', mine: null, creator: { username: 'oftx', linuxdo_id: 447199 } },
             packetId: 'hp4', matched: true, createdAt: 4,
           },
+          {
+            id: 'hp5', code: '80146763', charset: 'numeric', claimMode: 'manual', status: 'done',
+            result: '领取成功: +1.23 LDC', lines: [{ text: '领取成功: +1.23 LDC', tone: 'success' }],
+            packet: { id: 'hp5', type: 'random', status: 'exhausted', code: '80146763', mine: 1.23, creator: { username: 'alice', linuxdo_id: 1 } },
+            packetId: 'hp5', matched: true, createdAt: 5,
+          },
         ],
         settings: { charset: 'text', batch: false, claimMode: 'manual', gapExtraMs: 0, display: 'panel' },
       };
@@ -106,7 +122,16 @@
           sendMessage: async (message) => {
             sent.push(message);
             if (message.type === 'hb:state:get') return { ok: true, state };
-            if (message.type === 'hb:packet') return { ok: true, packet: packetDetails[message.id] || null };
+            if (message.type === 'hb:packet') {
+              // hp5 专门验「后台内存里没有整包快照」那条路：cache 读个空，refresh 才在延迟后回包。
+              if (message.cache === true) {
+                return entryId === 'hp5'
+                  ? { ok: false, error: '内存里没有这个红包的快照' }
+                  : { ok: true, packet: packetDetails[message.id] || null };
+              }
+              if (entryId === 'hp5') await new Promise((resolve) => setTimeout(resolve, 300));
+              return { ok: true, packet: packetDetails[message.id] || null };
+            }
             if (message.type === 'hb:session') return { ok: true, loggedIn: true, username: 'harness', linuxdo_id: 9 };
             if (message.type === 'hb:claim') {
               return {
@@ -148,12 +173,23 @@
         const host = () => document.getElementById('hb-envelope-host');
         const card = () => host() && host().shadowRoot && host().shadowRoot.querySelector('.redpacket-envelope');
         const inCard = (selector) => (card() ? card().querySelector(selector) : null);
+        const loadingBox = () => document.getElementById('hb-card-loading');
         const click = (node) => node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         const lottery = entryId === 'hp2';
         const claims = (type) => sent.filter((message) => message.type === type);
+        const packetReads = () => sent.filter((message) => message.type === 'hb:packet');
+        const cacheReads = () => packetReads().filter((message) => message.cache === true);
+        const refreshReads = () => packetReads().filter((message) => message.refresh === true);
 
         try {
           for (let index = 0; index < 6; index += 1) await tick();
+          // hp5 的只读查询要 300ms 才回来：趁这会儿看窗口里是不是只有一层 loading。
+          if (entryId === 'hp5') {
+            check('数据回来之前只显示 loading',
+              Boolean(loadingBox()) && loadingBox().hidden === false,
+              loadingBox() ? 'hidden=' + loadingBox().hidden : '没有 loading 层');
+            check('数据回来之前不铺卡片样式', host() === null);
+          }
           // 自检页是 file://，拿不到可 fetch 的同包样式，走 <link> 兜底：样式到位前卡片先藏着，
           // 400ms 后再放开。多等一会儿再断言「已经看得见」。
           await new Promise((resolve) => setTimeout(resolve, 600));
@@ -198,6 +234,21 @@
             check('卡片只有一层外壳',
               Boolean(card()) && card().querySelectorAll('.redpacket-envelope').length === 0
               && Boolean(card().parentElement) && card().parentElement.classList.contains('modal-overlay'));
+            check('数据到位后撤掉 loading',
+              Boolean(loadingBox()) && loadingBox().hidden === true,
+              loadingBox() ? 'hidden=' + loadingBox().hidden : '没有 loading 层');
+
+            // 详情的读法：先问后台内存里的整包快照（cache 读，0 次请求），命中就直接铺卡片；
+            // 命中且这张卡片还要看结论（领取记录、参与名单）才在后台补一次只读刷新。
+            if (entryId === 'hp5') {
+              check('内存里没有时 cache 读空后补一次只读查询',
+                cacheReads().length === 1 && refreshReads().length === 1, JSON.stringify(packetReads()));
+            } else {
+              check('先问后台内存里的整包快照', cacheReads().length === 1, JSON.stringify(packetReads()));
+              const wantRefresh = entryId === 'hp3' || entryId === 'hp4' ? 1 : 0;
+              check(wantRefresh ? '看过结论的卡片在后台补一次刷新' : '还在等点击的卡片不在后台白占一次请求间隔',
+                refreshReads().length === wantRefresh, JSON.stringify(packetReads()));
+            }
 
             if (entryId === 'hp1') {
               check('待开启的红包显示发件人与口令',

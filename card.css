@@ -3,7 +3,7 @@
  * 卡片本体的样式在 envelope.css 里（挂在影子 DOM 上），这份只管窗口页面这一层：
  * 底色就用原站页面底色（--bg-primary），那层半透明遮罩（rgba(24,24,27,.5)）落下来
  * 之后四周就是原站窗口里那一圈灰，不会因为我们垫了别的底色而变色。
- * 窗口尺寸由 card.js 按卡片收紧。
+ * 窗口尺寸由 card.js 按卡片收紧。数据没到位时这里只有 #hb-card-loading 那一层。
  */
 html,
 body {
@@ -35,13 +35,65 @@ body {
   text-align: center;
 }
 
+/* 详情还在路上时窗口里只有这一层：一个小转圈加一行字，不带任何卡片样式（信封的红金由
+   envelope.css 在数据到位后挂上去）。底色就用下面 html/body 的原站底色，亮暗两套跟着走。
+   原生站点同样是「数据回来才弹信封」，这里只是把等待本身画出来，不让人对着一屏空白等。 */
+#hb-card-loading {
+  box-sizing: border-box;
+  margin: 0;
+  min-height: 100vh;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: #71717a;
+  font: 14px/1.6 "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  text-align: center;
+}
+
+#hb-card-loading p {
+  margin: 0;
+}
+
+.hb-card-spinner {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 3px solid rgba(24, 24, 27, 0.12);
+  border-top-color: #a1a1aa;
+  animation: hb-card-spin 0.8s linear infinite;
+}
+
+@keyframes hb-card-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hb-card-spinner { animation-duration: 1.8s; }
+}
+
 @media (prefers-color-scheme: dark) {
   #hb-card-error {
     color: #fafafa;
+  }
+
+  #hb-card-loading {
+    color: #a1a1aa;
+  }
+
+  .hb-card-spinner {
+    border-color: rgba(250, 250, 250, 0.16);
+    border-top-color: #71717a;
   }
 }
 
 /* 作者样式里的 display 比浏览器默认的 [hidden] 优先级高，得自己把隐藏写回来。 */
 #hb-card-error[hidden] {
+  display: none;
+}
+
+#hb-card-loading[hidden] {
   display: none;
 }

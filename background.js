@@ -719,13 +719,16 @@ async function handleClaim(message) {
   return { ok: true, state: snapshot(), outcome, packet: livePackets.get(key) || null };
 }
 
-// 红包详情：面板打开卡片时按 id 读红包本身。内存里有（看护刚轮询过）就直接用，
-// 没有或要求 refresh 时补一次网络查询；这里永远是 GET，不会触发任何写请求。
-async function readPacket(id, refresh) {
+// 红包详情：详情窗口打开卡片时按 id 读红包本身。内存里有（刚查询过、刚拿到领取回执、看护刚
+// 轮询过）就直接用——详情读取要占一次请求间隔（上一次请求结束起 5 秒 + 加时），能省就省；
+// 没有或要求 refresh 时才补一次网络查询（受限速）。cacheOnly 只问内存、绝不发请求：详情
+// 窗口靠它决定「直接铺卡片」还是「先挂一层 loading 等这次只读查询」。这里永远是 GET。
+async function readPacket(id, options = {}) {
   const key = String(id || '');
   if (!key) return { ok: false, error: '缺少红包 ID' };
   let packet = livePackets.get(key) || null;
-  if (!packet || refresh === true) {
+  if (!packet && options.cacheOnly === true) return { ok: false, error: '内存里没有这个红包的快照' };
+  if (!packet || options.refresh === true) {
     try {
       // 详情刷新同样按一次操作限速：等间隔、只读一次、结束即刷新刻度。
       const response = await throttled(() => siteQuery(P.packetUrl(key)));
@@ -781,7 +784,8 @@ async function handleSubmit(message) {
 // hb:submit       → { ok, added, state }（载荷 { codes: [{ code, charset }], claimMode }）
 // hb:claim        → { ok, state }（载荷 { id, trusted: true }，真实点击授权后的一次性领取）
 //                   成功时附带 { outcome, packet }：面板详情卡片据此渲染领取金额与记录
-// hb:packet       → { ok, packet }（载荷 { id, refresh }，只读红包本身，供详情卡片刷新）
+// hb:packet       → { ok, packet }（载荷 { id, refresh, cache }，只读红包本身：cache 只问内存，
+//                   refresh 再发一次只读 GET；详情窗口靠它省下能省的那一次请求间隔）
 // hb:void / hb:delete / hb:clear / hb:void-all / hb:resume → { ok, state }
 // hb:session      → { ok, loggedIn, username, linuxdo_id }
 async function handleMessage(message) {
@@ -804,7 +808,10 @@ async function handleMessage(message) {
     case 'hb:claim':
       return handleClaim(message);
     case 'hb:packet':
-      return readPacket(message.id, message.refresh === true);
+      return readPacket(message.id, {
+        refresh: message.refresh === true,
+        cacheOnly: message.cache === true,
+      });
     case 'hb:void':
       return { ok: true, state: await voidEntry(String(message.id || '')) };
     case 'hb:delete':

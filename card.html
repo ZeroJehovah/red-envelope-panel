@@ -6,6 +6,12 @@
     <link rel="stylesheet" href="card.css" />
   </head>
   <body>
+    <!-- 详情没读回来之前窗口里只放这一层：卡片的信封样式（红金）要等数据到位才铺开。
+         原生站点也是这个次序——先 await /api/hongbao/<id>，回来才把信封模态 active。 -->
+    <main id="hb-card-loading" role="status">
+      <div class="hb-card-spinner" aria-hidden="true"></div>
+      <p>正在读取红包详情…</p>
+    </main>
     <main id="hb-card-error" hidden></main>
     <script src="browser-shim.js"></script>
     <script src="hb-protocol.js"></script>

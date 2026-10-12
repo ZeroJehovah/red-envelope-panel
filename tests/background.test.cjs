@@ -533,6 +533,17 @@ test('详情卡片：领取回执带回结果与红包，详情按 id 只读读�
   assert.equal(env.requests.filter((item) => item.url.endsWith('/api/hongbao/p1')).length, 0,
     '内存里有红包快照时不发请求');
 
+  // 详情窗口先问 cache：内存里这一份直接回给窗口铺卡片，一次请求都不发。
+  const cacheOnly = await env.send({ type: 'hb:packet', id: 'p1', cache: true });
+  assert.equal(cacheOnly.ok, true);
+  assert.equal(cacheOnly.packet.id, 'p1');
+  // 内存里没有时 cache 也不发请求，直接回失败：窗口据此挂一层 loading，再走一次 refresh。
+  const cacheMiss = await env.send({ type: 'hb:packet', id: 'nope', cache: true });
+  assert.equal(cacheMiss.ok, false);
+  assert.match(cacheMiss.error, /内存里没有/);
+  assert.equal(env.requests.filter((item) => item.url.endsWith('/api/hongbao/nope')).length, 0,
+    'cache 读不发任何请求');
+
   // refresh 走一次只读 GET，把领取记录补回来，而且不会发写请求。
   const pending = env.send({ type: 'hb:packet', id: 'p1', refresh: true });
   await env.advance(5000);

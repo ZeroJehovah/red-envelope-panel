@@ -272,6 +272,42 @@ test('历史行的开红包走独立详情窗口', () => {
   assert.match(readFileSync(join(root, 'envelope.js'), 'utf8'), /closeCard\(replaced\)/, '换卡片与用户关卡片没有区分开');
 });
 
+test('红包详情窗口在数据回来之前只显示 loading', () => {
+  const cardPage = readFileSync(join(root, 'card.html'), 'utf8');
+  const card = readFileSync(join(root, 'card.js'), 'utf8');
+  const cardCss = readFileSync(join(root, 'card.css'), 'utf8');
+  const background = readFileSync(join(root, 'background.js'), 'utf8');
+
+  // 窗口里先摆一层 loading，卡片的信封样式要等数据到位才挂上去；原生站点也是这个次序
+  // （先 await /api/hongbao/<id>，数据回来才把信封模态 active）。
+  assert.match(cardPage, /<main id="hb-card-loading" role="status">/, '详情窗口里没有 loading 层');
+  assert.match(card, /getElementById\('hb-card-loading'\)/, 'loading 层没有开关');
+  assert.match(card, /setLoading\(false\);\n\s+const box = document\.getElementById\('hb-card-error'\)/,
+    '报错时没有撤掉 loading');
+  assert.match(cardCss, /\n#hb-card-loading \{[^}]*display: flex;/, 'loading 层没有样式');
+  assert.match(cardCss, /\n#hb-card-loading\[hidden\] \{/,
+    'loading 层的 [hidden] 会被作者的 display 盖掉，得自己写回来');
+  assert.match(cardCss, /@media \(prefers-color-scheme: dark\) \{[\s\S]*?#hb-card-loading \{[\s\S]*?\n\}/,
+    'loading 层没有暗色一套');
+
+  // 先问后台内存里的整包快照（刚查询、刚领取回执、看护刚轮询过）：命中就一次请求都不发——
+  // 详情读取要占一次请求间隔（上一次请求结束起 5 秒 + 加时），那正是「点开要等好几秒」的来源。
+  assert.match(card, /readPacket\(packetId, \{ cache: true \}\)/, '详情窗口没有先问后台内存里的整包快照');
+  assert.match(background, /cacheOnly: message\.cache === true/, '后台没有 cache-only 读取');
+  assert.match(background, /if \(!packet && options\.cacheOnly === true\) return \{ ok: false/,
+    'cache-only 读不到内存必须直接回失败，不能偷偷发请求');
+
+  // 内存里没有就只剩一次只读 GET：这一段由 loading 顶着，读不到就退回历史里的快照。
+  assert.match(card, /readPacket\(packetId, \{ refresh: true \}\)/, '内存里没有时没有补那次只读查询');
+  assert.match(card, /await showCard\(fresh \|\| entry\.packet, user\)/, '读不到详情时没有退回历史快照');
+  // 窗口尺寸在铺卡片之前按真实红包收紧：这会儿窗口里还是 loading，缩放看不见。
+  assert.match(card, /await fitWindow\(packet\);\n\s+const handle = envelope\.show\(/,
+    '窗口没有在铺卡片之前按卡片尺寸收紧');
+  // 快照终究是快照：已经在看结论的卡片（领取记录、参与名单）后台补一次只读刷新；还在等点击的
+  // 卡片别白占一次请求间隔，免得跟用户紧接着的那一次点击抢同一份间隔。
+  assert.match(card, /if \(handle && !claimable\)/, '后台补刷新没有区分卡片是否还在等点击');
+});
+
 test('卡片显示的内容与红包站卡片一致', () => {
   // 逐条对齐 hb.unsnow.org 的 app.js（v=a0a5b8fa）：showEnvelopeResult / renderEnvelopeClaims /
   // renderLottery。上一版把「不是自己领的红包」的金额抹成 null，看起来和原站就差了那一大块数字。

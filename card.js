@@ -11,6 +11,12 @@
  * 窗口自己认领身份：红包条目 id 由面板写在 URL 上（card.html?id=…），窗口号记进
  * chrome.storage.session 的 hb-card-window，面板据此复用同一个窗口——同一个红包就把它拉到
  * 前面，换个红包就把旧窗口关掉、按新卡片重开一个，不会点一次开一个。
+ *
+ * v0.9.12 起窗口不再「先铺卡片、再慢慢补数据」。详情读取要占一次请求间隔（上一次请求**结束**
+ * 起 5 秒再加设置里的加时），点开时刚查询或刚领取完，这张卡片就会几秒不变。现在分两步：后台
+ * 内存里已经有这包的整包快照（刚查询、刚领取回执、开奖看护刚轮询过）就直接铺卡片，一次请求都
+ * 不发；内存里没有就先只显示一层 loading，等只读查询回来再铺卡片。原生站点也是这个次序——
+ * 先 await /api/hongbao/<id>，数据回来才把信封模态 active。
  */
 'use strict';
 
@@ -27,9 +33,16 @@
     console.warn('[红包详情窗口] ' + message, error ?? '');
   }
 
+  // 数据没到位之前窗口里只显示这一层 loading（markup 里就摆着），卡片一铺上就撤掉。
+  function setLoading(visible) {
+    const box = document.getElementById('hb-card-loading');
+    if (box) box.hidden = !visible;
+  }
+
   // 窗口里没有面板那种行级出口，出问题就写在窗口中央，别只留一屏黑。
   function fail(message) {
     warn(message);
+    setLoading(false);
     const box = document.getElementById('hb-card-error');
     if (box) {
       box.textContent = message;
@@ -48,9 +61,15 @@
     });
   }
 
-  async function readPacket(packetId, network) {
+  // 读红包详情：cache 只问后台内存里的整包快照（0 次请求），refresh 才再发一次只读 GET。
+  async function readPacket(id, options = {}) {
     try {
-      const response = await api.runtime.sendMessage({ type: 'hb:packet', id: packetId, refresh: network === true });
+      const response = await api.runtime.sendMessage({
+        type: 'hb:packet',
+        id,
+        cache: options.cache === true,
+        refresh: options.refresh === true,
+      });
       return response?.ok ? response.packet : null;
     } catch {
       return null;
@@ -102,6 +121,31 @@
 
   /* ---------------------------------- 入口 ---------------------------------- */
 
+  // 窗口里只有一张卡片：这几项在 main() 里定下之后不再变。
+  let entry = null;
+  let packetId = '';
+  let claimable = false;
+
+  // 铺卡片：先把窗口按卡片尺寸收紧——这会儿窗口里还是 loading，缩放看不见——再挂卡片、
+  // 撤掉 loading。读不到最新详情时传进来的就是历史里的快照，卡片照铺。
+  async function showCard(packet, user) {
+    await fitWindow(packet);
+    const handle = envelope.show({
+      entry,
+      packet,
+      user: user || null,
+      viewOnly: !claimable,
+      // 领取／参与只是把这次真实点击转成一条 hb:claim，授权判定仍在后台。
+      onWrite: () => send({ type: 'hb:claim', id: entryId, trusted: true }),
+      onRefresh: (network) => readPacket(packetId, { refresh: network === true }),
+      // 卡片被关掉（× / 确定 / 关闭）就等于关这个窗口；换卡片时 envelope.js 不触发它。
+      onClose: () => window.close(),
+    });
+    if (!handle) return fail('红包卡片打开失败。');
+    setLoading(false);
+    return handle;
+  }
+
   async function main() {
     try {
       const current = await api.windows?.getCurrent();
@@ -114,7 +158,7 @@
       return;
     }
     const response = await send({ type: 'hb:state:get' });
-    const entry = (response?.state?.entries || []).find((item) => item.id === entryId);
+    entry = (response?.state?.entries || []).find((item) => item.id === entryId) || null;
     if (!entry?.packet?.id) {
       fail('这条记录没有红包详情可看，可能已经在面板里被删掉了。');
       return;
@@ -124,36 +168,39 @@
       return;
     }
     await rememberWindow();
-    // 先把窗口摆到卡片尺寸，卡片再淡入，避免先按默认大小闪一帧。
-    await fitWindow(entry.packet);
+    packetId = entry.packet.id;
+    claimable = entry.status === 'awaiting' && entry.claimMode === 'manual';
 
-    const packetId = entry.packet.id;
-    const claimable = entry.status === 'awaiting' && entry.claimMode === 'manual';
-    const handle = envelope.show({
-      entry,
-      packet: entry.packet,
-      viewOnly: !claimable,
-      // 领取／参与只是把这次真实点击转成一条 hb:claim，授权判定仍在后台。
-      onWrite: () => send({ type: 'hb:claim', id: entryId, trusted: true }),
-      onRefresh: (network) => readPacket(packetId, network),
-      // 卡片被关掉（× / 确定 / 关闭）就等于关这个窗口；换卡片时 envelope.js 不触发它。
-      onClose: () => window.close(),
-    });
-    if (!handle) {
-      fail('红包卡片打开失败。');
-      return;
-    }
-    // 面板是拿着历史里的快照开窗的，这里再补一次只读详情与会话，让卡片信息完整。
-    const [fresh, session] = await Promise.all([
-      readPacket(packetId, true),
+    // 先问后台内存里有没有这包的整包快照（刚查询、刚领取回执、开奖看护刚轮询过）。有就直接
+    // 拿它铺卡片：一次请求都不发，也就省下了那一次请求间隔。会话查询同时出发，不挡显示。
+    const [cached, session] = await Promise.all([
+      readPacket(packetId, { cache: true }),
       send({ type: 'hb:session' }),
     ]);
     const user = session?.ok && session.loggedIn
       ? { username: session.username, linuxdo_id: session.linuxdo_id ?? null }
       : null;
-    handle.update({ packet: fresh || undefined, user });
-    // 读不到最新详情时卡片显示的是历史里的快照，这与脚本版一致，不再另写提示。
-    if (!fresh) warn('暂时读不到红包 ' + packetId + ' 的最新详情，显示本地记录。');
+
+    if (!cached) {
+      // 内存里没有就只剩这一条路：一次只读查询（受限速），这段时间由 loading 顶着。
+      const fresh = await readPacket(packetId, { refresh: true });
+      // 读不到最新详情时卡片显示的是历史里的快照，这与脚本版一致，不再另写提示。
+      if (!fresh) warn('暂时读不到红包 ' + packetId + ' 的最新详情，显示本地记录。');
+      await showCard(fresh || entry.packet, user);
+      return;
+    }
+
+    const handle = await showCard(cached, user);
+    // 快照终究是快照：已经在看结论的卡片（领取记录、参与名单）在后台补一次只读刷新，回来就地
+    // 更新。还在等点击的卡片没有要补的字段——封口视图只看发件人与口令，抽奖卡由自己的轮询接着
+    // 刷新，也免得跟用户紧接着的那一次点击抢同一份请求间隔。
+    if (handle && !claimable) {
+      readPacket(packetId, { refresh: true }).then((latest) => {
+        if (latest?.id) handle.update({ packet: latest });
+      }, () => {
+        // 补不上就保持手上的快照，卡片自己会在下一轮轮询里再试。
+      });
+    }
   }
 
   // 窗口被关掉（或改开别的红包）时，把会话存储里的窗口号收干净。
@@ -166,7 +213,7 @@
     if (Array.isArray(entries) && !entries.some((item) => item.id === entryId)) window.close();
   });
 
-  main();
+  main().catch((error) => { fail('打开红包详情失败：' + (error?.message || error)); });
 
   globalThis.HBCard = { entryId, fitWindow };
 })();
