@@ -134,6 +134,24 @@ test('红包详情卡片随包，头像用站点返回的地址', () => {
   assert.equal(js.includes('<div class="redpacket-envelope">'), false, 'ENVELOPE_MARKUP 里不该再套一层卡片');
 });
 
+test('清单的 CSP 放行站点返回的头像图片', () => {
+  // 扩展页的 CSP 由清单写死，img-src 少一项就会在图片发出请求前整批拦掉
+  // （控制台报 "violates the following Content Security Policy directive:
+  //  img-src 'self' data:"），卡片的 onerror 兜底只会把头像换成占位图，
+  // 看着像「头像又没了」，其实是策略没放行。站点返回的头像在论坛 CDN
+  // （cdn.ldstatic.com），扩展页拿不到具体域名，只能按 scheme 放行 https:。
+  const csp = manifest.content_security_policy?.extension_pages || '';
+  const imgSrc = (csp.match(/img-src([^;]*)/) || [, ''])[1].trim().split(/\s+/);
+  assert.ok(imgSrc.includes("'self'"), 'CSP 丢了 img-src self');
+  assert.ok(imgSrc.includes('data:'), 'CSP 丢了 img-src data:（内联 SVG 头像兜底要用）');
+  assert.ok(imgSrc.includes('https:') || imgSrc.some((s) => s.startsWith('https://')),
+    'CSP 的 img-src 没放行站点返回的头像地址，头像会被浏览器直接拦掉');
+  // 别的口子不能跟着松：脚本仍然只跑随包的，协议请求仍然只发红包站。
+  assert.match(csp, /script-src 'self'/, 'script-src 不再是 only-self');
+  assert.match(csp, /connect-src 'self' https:\/\/hb\.unsnow\.org/, 'connect-src 越界');
+  assert.equal(/script-src[^;]*https?:/.test(csp), false, 'script-src 放行了远程脚本');
+});
+
 test('面板按脚本版侧边栏的结构复刻控件', () => {
   // 这一组是脚本版 ensurePanel() 里逐项对应的控件，缺一个都算没复刻。
   const panel = readFileSync(join(root, 'panel.js'), 'utf8');
