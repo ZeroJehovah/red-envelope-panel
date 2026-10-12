@@ -1,22 +1,27 @@
 <!doctype html>
 <!-- 红包详情窗口的 DOM 自检页（开发期用，不随扩展发布）。
 
-     用法：把本文件连同 card.js / card.css / envelope.js / envelope.css / hb-protocol.js /
-     browser-shim.js 复制到扩展产物目录（与 manifest.json 同级），再用 Chrome 打开并带上红包条目
-     id；自检跑完把结果写进 #harness-result，标题变为 HARNESS-PASS / HARNESS-FAIL。
+     用法：把本文件连同 card.js / card.css / card-window.js / envelope.js / envelope.css /
+     hb-protocol.js / browser-shim.js 复制到扩展产物目录（与 manifest.json 同级），再用 Chrome
+     打开并带上红包条目 id；自检跑完把结果写进 #harness-result，标题变为 HARNESS-PASS /
+     HARNESS-FAIL。
 
-       card-harness.html?id=hp1        待开启的普通红包（可领）
-       card-harness.html?id=hp2        抽奖红包（未报名）
-       card-harness.html?id=hp3        已领取完的历史红包
-       card-harness.html?id=hp4        已领完且自己没领到（金额显示 0.00）
-       card-harness.html?id=hp5        后台内存里没有、要等一次只读查询（先看 loading）
-       card-harness.html?id=missing    条目不在时的兜底说明
+     URL 上的 view 决定卡片种类（card.js）：view=claim 是等着点一下的领取卡片，缺省或
+     view=detail 是只读的详情卡片。
+
+       card-harness.html?id=hp1&view=claim   待开启的普通红包（领取卡片，可领）
+       card-harness.html?id=hp2&view=claim   抽奖红包（领取卡片，未报名）
+       card-harness.html?id=hp3              已领取完的历史红包（详情卡片）
+       card-harness.html?id=hp4              已领完且自己没领到（金额显示 0.00，详情卡片）
+       card-harness.html?id=hp5              后台内存里没有、要等一次只读查询（先看 loading，详情卡片）
+       card-harness.html?id=hp6              待开启的普通红包但开成只读详情卡片（点历史行那种：不带领取入口）
+       card-harness.html?id=missing          条目不在时的兜底说明
 
      无头运行示例（窗口至少 424×668，卡片才铺到原尺寸 384×624）：
        chrome.exe --headless=new --disable-gpu --virtual-time-budget=8000 \
          --window-size=560,900 \
          --user-data-dir="D:\Green Files\ChromeForTestingProfiles\card-harness" \
-         --dump-dom "file:///D:/Green%20Files/chrome%20plugins/red-envelope-panel/card-harness.html?id=hp1"
+         --dump-dom "file:///D:/Green%20Files/chrome%20plugins/red-envelope-panel/card-harness.html?id=hp1&view=claim"
 -->
 <html lang="zh-CN">
   <head>
@@ -79,6 +84,11 @@
           creator: { username: 'alice', linuxdo_id: 1 }, count: 5, claimed_count: 2, claimed_amount: 1.23,
           mine: 1.23, claims: [{ share_id: 7, username: 'carol', amount: 1.23, at: 2 }],
         },
+        hp6: {
+          id: 'hp6', type: 'random', status: 'active', code: '11775521', wish: '恭喜发财，大吉大利',
+          creator: { username: 'alice', linuxdo_id: 1 }, count: 5, claimed_count: 2, claimed_amount: 1.23,
+          claims: [{ share_id: 7, username: 'carol', amount: 1.23, at: 2 }],
+        },
       };
       const state = {
         entries: [
@@ -111,6 +121,13 @@
             result: '领取成功: +1.23 LDC', lines: [{ text: '领取成功: +1.23 LDC', tone: 'success' }],
             packet: { id: 'hp5', type: 'random', status: 'exhausted', code: '80146763', mine: 1.23, creator: { username: 'alice', linuxdo_id: 1 } },
             packetId: 'hp5', matched: true, createdAt: 5,
+          },
+          {
+            // 待开启，但这次是按「点历史行」的方式打开的：给的是只读详情卡片。
+            id: 'hp6', code: '11775521', charset: 'numeric', claimMode: 'manual', status: 'awaiting',
+            result: '等待手动开启', lines: [{ text: '等待手动开启', tone: 'muted' }],
+            packet: { id: 'hp6', type: 'random', status: 'active', code: '11775521', creator: { username: 'alice', linuxdo_id: 1 } },
+            packetId: 'hp6', matched: true, createdAt: 6,
           },
         ],
         settings: { charset: 'text', batch: false, claimMode: 'manual', gapExtraMs: 0, display: 'panel' },
@@ -160,6 +177,7 @@
     </script>
     <script src="browser-shim.js"></script>
     <script src="hb-protocol.js"></script>
+    <script src="card-window.js"></script>
     <script src="envelope.js"></script>
     <script src="card.js"></script>
     <script>
@@ -176,6 +194,9 @@
         const loadingBox = () => document.getElementById('hb-card-loading');
         const click = (node) => node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         const lottery = entryId === 'hp2';
+        // 卡片种类（card.js 的 view 参数）：hp1（待开启的普通红包）与 hp2（未报名的抽奖）走
+        // 领取卡片，其余 id 是只读的详情卡片。
+        const viewKind = entryId === 'hp1' || entryId === 'hp2' ? 'claim' : 'detail';
         const claims = (type) => sent.filter((message) => message.type === type);
         const packetReads = () => sent.filter((message) => message.type === 'hb:packet');
         const cacheReads = () => packetReads().filter((message) => message.cache === true);
@@ -201,8 +222,10 @@
             check('条目不在时不挂卡片', host() === null);
           } else {
             const record = sessionBag['hb-card-window'];
-            check('窗口登记自己的窗口号与红包 id',
-              Boolean(record) && record.windowId === 7 && record.entryId === entryId, JSON.stringify(record));
+            check('窗口按卡片种类登记自己的窗口号与红包 id',
+              Boolean(record) && Boolean(record[viewKind])
+              && record[viewKind].windowId === 7 && record[viewKind].entryId === entryId,
+              JSON.stringify(record));
             // 窗口按卡片收紧（视口至少要放得下卡片与遮罩留白）：普通 424×668，抽奖 544×812。
             // 屏幕装不下时不收紧（保持面板要的外框尺寸），这两种结果都算过。
             const want = lottery ? [544, 812] : [424, 668];
@@ -245,9 +268,24 @@
                 cacheReads().length === 1 && refreshReads().length === 1, JSON.stringify(packetReads()));
             } else {
               check('先问后台内存里的整包快照', cacheReads().length === 1, JSON.stringify(packetReads()));
-              const wantRefresh = entryId === 'hp3' || entryId === 'hp4' ? 1 : 0;
-              check(wantRefresh ? '看过结论的卡片在后台补一次刷新' : '还在等点击的卡片不在后台白占一次请求间隔',
+              const wantRefresh = entryId === 'hp3' || entryId === 'hp4' || entryId === 'hp6' ? 1 : 0;
+              check(wantRefresh ? '看过结论的卡片在后台补一次刷新' : '还在等点击的卡片不在后台多跑一趟',
                 refreshReads().length === wantRefresh, JSON.stringify(packetReads()));
+            }
+
+            if (entryId === 'hp6') {
+              // 点历史行开出来的只读详情卡片：即便这个红包还等着点一下，卡片也不露开启入口，
+              // 对着那个藏起来的开启按钮来一发合成点击同样不会发领取请求（viewOnly 挡在 runWrite 门口）。
+              check('只读详情卡片不露出开启入口',
+                Boolean(inCard('#envelope-closed-view')) && inCard('#envelope-closed-view').style.display === 'none',
+                inCard('#envelope-closed-view') && inCard('#envelope-closed-view').style.display);
+              check('只读详情卡片直接给出结论视图',
+                Boolean(inCard('#envelope-opened-view')) && inCard('#envelope-opened-view').style.display === 'flex'
+                && String((inCard('#env-opened-title') || {}).textContent || '') === '来自 alice 的红包',
+                inCard('#env-opened-title') && inCard('#env-opened-title').textContent);
+              if (inCard('#btn-open-packet')) click(inCard('#btn-open-packet'));
+              await tick();
+              check('只读详情卡片点了也不发领取请求', claims('hb:claim').length === 0, JSON.stringify(claims('hb:claim')));
             }
 
             if (entryId === 'hp1') {
@@ -321,8 +359,9 @@
             window.dispatchEvent(new Event('pagehide'));
             await tick();
             await tick();
-            check('窗口关掉后清掉会话存储里的窗口号',
-              sessionBag['hb-card-window'] === undefined, JSON.stringify(sessionBag));
+            const bag = sessionBag['hb-card-window'];
+            check('窗口关掉后清掉自己那一格会话记录',
+              !bag || bag[viewKind] === undefined, JSON.stringify(sessionBag));
           }
         } catch (error) {
           failed.push('FAIL 抛出异常 → ' + String(error && error.stack || error));

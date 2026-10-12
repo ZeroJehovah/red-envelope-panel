@@ -9,24 +9,33 @@
  * 历史回写与开奖看护都在后台，跟卡片画在哪个页面无关。
  *
  * 窗口自己认领身份：红包条目 id 由面板写在 URL 上（card.html?id=…），窗口号记进
- * chrome.storage.session 的 hb-card-window，面板据此复用同一个窗口——同一个红包就把它拉到
- * 前面，换个红包就把旧窗口关掉、按新卡片重开一个，不会点一次开一个。
+ * chrome.storage.session 的 hb-card-window（按卡片种类分格，见 card-window.js），面板与后台
+ * 据此复用同一个窗口——同一张卡片同一个红包就把它拉到前面，换个红包就把这一种的旧窗口关掉、
+ * 按新卡片重开一个，不会点一次开一个。
  *
- * v0.9.12 起窗口不再「先铺卡片、再慢慢补数据」。详情读取要占一次请求间隔（上一次请求**结束**
- * 起 5 秒再加设置里的加时），点开时刚查询或刚领取完，这张卡片就会几秒不变。现在分两步：后台
- * 内存里已经有这包的整包快照（刚查询、刚领取回执、开奖看护刚轮询过）就直接铺卡片，一次请求都
- * 不发；内存里没有就先只显示一层 loading，等只读查询回来再铺卡片。原生站点也是这个次序——
- * 先 await /api/hongbao/<id>，数据回来才把信封模态 active。
+ * URL 上的 view 决定这一副卡片是哪一种：view=claim 是「等着点一下」的领取卡片（口令查到可领的
+ * 红包后由后台自动弹出，对应脚本版 showClaimEnvelope / showLotteryEnvelope），没有这个参数或
+ * view=detail 就是只读的详情卡片（点历史行的红包按钮开出，对应脚本版 openHistoryPacket）。
+ * 领取动作只挂在领取卡片上：历史开出来的详情卡片从不带领取入口。
+ *
+ * v0.9.12 起窗口不再「先铺卡片、再慢慢补数据」：后台内存里已经有这包的整包快照（刚查询、刚领
+ * 取回执、开奖看护刚轮询过）就直接铺卡片，一次请求都不发；内存里没有就先只显示一层 loading，
+ * 等只读查询回来再铺卡片。原生站点也是这个次序——先 await /api/hongbao/<id>，数据回来才把
+ * 信封模态 active。（v0.11.0 起这次按 id 的只读不再等口令查询的间隔，省这一趟少了一层理由，
+ * 但次序照旧：它仍是一次网络往返，铺卡片之前不该出现空壳。）
  */
 'use strict';
 
 (function () {
   const api = globalThis.HBApi;
   const envelope = globalThis.HBEnvelope;
-  const CARD_WINDOW_KEY = 'hb-card-window';
+  const cardWindow = globalThis.HBCardWindow;
   const STATE_KEY = 'hb-state-v1';
 
-  const entryId = new URLSearchParams(location.search).get('id') || '';
+  const params = new URLSearchParams(location.search);
+  const entryId = params.get('id') || '';
+  // 「等着点一下的领取卡片」是口令查到后由后台自动弹出来的那种窗口：它带 view=claim。
+  const claimView = params.get('view') === 'claim';
   let windowId = null;
 
   function warn(message, error) {
@@ -79,23 +88,14 @@
   /* --------------------------------- 窗口本身 --------------------------------- */
 
   // 窗口号留在会话存储里（storage.session 只活在这一次浏览器会话，重启即清），
-  // 面板读它来复用窗口；窗口被关掉时自己清掉，面板下次点开就新开一个。
+  // 面板与后台读它来复用窗口；窗口被关掉时自己清掉，下次点开就新开一个。
   async function rememberWindow() {
-    try {
-      await api.storage.session.set({ [CARD_WINDOW_KEY]: { windowId, entryId } });
-    } catch (error) {
-      warn('记录详情窗口失败，面板将无从复用这个窗口', error);
-    }
+    await cardWindow.remember(claimView ? cardWindow.view.claim : cardWindow.view.detail, { windowId, entryId });
   }
 
   async function forgetWindow() {
-    try {
-      const bag = await api.storage.session.get(CARD_WINDOW_KEY);
-      // 只清自己那一条：换成别的红包时旧页面正在收尾，不能把新窗口刚写下的记录抹掉。
-      if (bag?.[CARD_WINDOW_KEY]?.entryId === entryId) await api.storage.session.remove(CARD_WINDOW_KEY);
-    } catch {
-      // 清不掉也不影响：面板认窗口靠 windows.get，认不到就重开一个。
-    }
+    // 只清自己那一条：另一种卡片、以及换成别的红包时旧页面正在收尾的记录都不能动。
+    await cardWindow.forget(claimView ? cardWindow.view.claim : cardWindow.view.detail, entryId);
   }
 
   // 按卡片尺寸收紧窗口：windows.create 的宽高是窗口外框，减掉浏览器自己的标题栏与边框，
@@ -103,7 +103,7 @@
   // 卡片自己会按视口高度收住。
   async function fitWindow(packet) {
     if (windowId === null) return;
-    const size = envelope.windowSize(packet);
+    const size = cardWindow.windowSize(packet);
     if (size.width > screen.availWidth || size.height > screen.availHeight) return;
     // 商家窗口管理器可能把第一次请求打个折扣，量到差得多就再摆一次，最多两轮。
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -147,6 +147,10 @@
   }
 
   async function main() {
+    if (!cardWindow) {
+      fail('红包详情窗口脚本未加载，请重新打开这个窗口。');
+      return;
+    }
     try {
       const current = await api.windows?.getCurrent();
       windowId = current?.id ?? null;
@@ -169,10 +173,10 @@
     }
     await rememberWindow();
     packetId = entry.packet.id;
-    claimable = entry.status === 'awaiting' && entry.claimMode === 'manual';
+    claimable = claimView && entry.status === 'awaiting' && entry.claimMode === 'manual';
 
     // 先问后台内存里有没有这包的整包快照（刚查询、刚领取回执、开奖看护刚轮询过）。有就直接
-    // 拿它铺卡片：一次请求都不发，也就省下了那一次请求间隔。会话查询同时出发，不挡显示。
+    // 拿它铺卡片，一次请求都不发（按 id 只读不进限速，省下的是这一趟网络往返）。会话查询同时出发，不挡显示。
     const [cached, session] = await Promise.all([
       readPacket(packetId, { cache: true }),
       send({ type: 'hb:session' }),
@@ -182,7 +186,7 @@
       : null;
 
     if (!cached) {
-      // 内存里没有就只剩这一条路：一次只读查询（受限速），这段时间由 loading 顶着。
+      // 内存里没有就只剩这一条路：一次按 id 只读查询（不进限速），这段时间由 loading 顶着。
       const fresh = await readPacket(packetId, { refresh: true });
       // 读不到最新详情时卡片显示的是历史里的快照，这与脚本版一致，不再另写提示。
       if (!fresh) warn('暂时读不到红包 ' + packetId + ' 的最新详情，显示本地记录。');
@@ -193,7 +197,7 @@
     const handle = await showCard(cached, user);
     // 快照终究是快照：已经在看结论的卡片（领取记录、参与名单）在后台补一次只读刷新，回来就地
     // 更新。还在等点击的卡片没有要补的字段——封口视图只看发件人与口令，抽奖卡由自己的轮询接着
-    // 刷新，也免得跟用户紧接着的那一次点击抢同一份请求间隔。
+    // 刷新，也没必要在用户紧接着点「开」之前多跑一趟。
     if (handle && !claimable) {
       readPacket(packetId, { refresh: true }).then((latest) => {
         if (latest?.id) handle.update({ packet: latest });

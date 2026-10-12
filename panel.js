@@ -20,9 +20,9 @@
   const P = globalThis.HBProtocol;
   // 口令清洗与校验规则在 code-rules.js，与脚本版逐字符一致。
   const codes = globalThis.HBCodes;
-  // 红包详情卡片在独立的详情窗口里渲染（card.html + card.js）；面板这边只借 envelope.js
-  // 算卡片的窗口尺寸（HBEnvelope.windowSize），自己不画卡片。
-  const envelope = globalThis.HBEnvelope;
+  // 红包详情卡片在独立的详情窗口里渲染（card.html + card.js）；面板这边只负责把窗口叫起来，
+  // 卡片尺寸与窗口复用都在 card-window.js（后台自动弹领取卡片时用的是同一份）。
+  const cardWindow = globalThis.HBCardWindow;
   const VERSION = api.runtime.getManifest().version;
   const STATE_KEY = 'hb-state-v1';
   // 面板与站点无关：入口只有扩展图标与浏览器侧边栏，红包站只作为登录与核对记录的跳转目标。
@@ -544,64 +544,22 @@
 
   /* ------------------------------ 红包详情窗口 ------------------------------ */
 
-  const CARD_PAGE = 'card.html';
-  // 详情窗口的窗口号记在会话存储里（storage.session 只活在这一次浏览器会话，重启即清），
-  // 面板据此复用同一个窗口，不让人点几次就开出一堆窗口来。
-  const CARD_WINDOW_KEY = 'hb-card-window';
-
-  async function cardWindowRecord() {
-    try {
-      const bag = await api.storage.session.get(CARD_WINDOW_KEY);
-      const record = bag?.[CARD_WINDOW_KEY];
-      return record?.windowId ? record : null;
-    } catch {
-      return null;
-    }
-  }
-
-  // 上一次开着的详情窗口还活着吗（被关掉后 windows.get 会失败，返回 null）。
-  async function liveCardWindow(record) {
-    if (!record) return null;
-    try {
-      return await api.windows.get(record.windowId);
-    } catch {
-      return null;
-    }
-  }
-
   // 打开红包详情：卡片在独立窗口里渲染——弹出面板受浏览器弹窗高度上限（600px）限制，
-  // 卡片按原尺寸（384×624、抽奖 504×768）会被压扁。同时只留一个详情窗口：同一个红包就把它
-  // 拉到前面，别的红包就把旧窗口关掉、按新卡片的尺寸重开一个（点几次都只有一个窗口）。
+  // 卡片按原尺寸（384×624、抽奖 504×768）会被压扁。这里开出来的永远是**只读的详情卡片**
+  // （脚本版 openHistoryPacket 也是同一副只读视图，从不给历史卡片挂开启按钮）：等着点一下的
+  // 领取卡片是口令查到可领的红包后由后台自动弹出的那一张，两种卡片各占一个窗口、互不顶掉。
   async function openEnvelopeWindow(id) {
     const entry = (lastState?.entries || []).find((item) => item.id === id);
     if (!entry?.packet?.id) {
       warn('这条记录没有红包详情可看：' + id);
       return;
     }
-    if (!envelope || !api.windows?.create) {
-      warn('当前浏览器打不开红包详情窗口，请重新打开面板。');
+    if (!cardWindow) {
+      warn('红包详情窗口脚本未加载，请重新打开面板。');
       return;
     }
-    const url = api.runtime.getURL(CARD_PAGE) + '?id=' + encodeURIComponent(id);
-    const record = await cardWindowRecord();
-    const existing = await liveCardWindow(record);
-    if (existing && record.entryId === id) {
-      // 窗口里就是这张卡片（同一个红包又点了一次）：拉到前面就行。
-      await api.windows.update(existing.id, { focused: true }).catch(() => {});
-      return;
-    }
-    if (existing) {
-      // 换个红包：把旧窗口关掉，下面按新卡片的尺寸重开一个。这里不去用 tabs.update 改已有
-      // 窗口的地址——扩展页能不能被这样导航要看浏览器对扩展源给不给权限，关掉重开是同一件事，
-      // 而且不会出现「窗口开着、里面还是上一个红包」的将就状态。
-      await api.windows.remove(existing.id).catch(() => {});
-    }
-    const size = envelope.windowOuterSize(entry.packet);
-    try {
-      await api.windows.create({ url, type: 'popup', focused: true, width: size.width, height: size.height });
-    } catch (error) {
-      warn('打开红包详情窗口失败', error);
-    }
+    const result = await cardWindow.open({ id, entry, packet: entry.packet, view: 'detail' });
+    if (result.ok !== true) warn('打开红包详情窗口失败：' + result.error);
   }
 
   /* -------------------------------- 侧边栏 --------------------------------- */

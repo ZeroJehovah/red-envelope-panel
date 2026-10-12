@@ -5,6 +5,8 @@
  *   - 请求只由后台发出，携带 hb.unsnow.org 会话 Cookie（credentials: 'include'）；
  *   - 限速时间戳落在 chrome.storage.local，worker 被回收后仍然生效；
  *   - 领取必须是真实点击授权后的一次性请求，发出后不自动重试；
+ *   - 古法查到可领的红包后自动弹出领取卡片（脚本版 showClaimEnvelope / showLotteryEnvelope
+ *     的对应物），领取仍然只认卡片上的真实点击；
  *   - 抽奖报名后停在 awaiting，由开奖看护按 id 只读轮询到开奖；
  *   - 删除按 ID 墓碑，写入按 ID 合并，绝不整体覆盖历史。
  *
@@ -13,7 +15,7 @@
  */
 'use strict';
 
-importScripts('browser-shim.js', 'code-rules.js', 'hb-protocol.js');
+importScripts('browser-shim.js', 'code-rules.js', 'hb-protocol.js', 'card-window.js');
 
 const api = globalThis.HBApi;
 const P = globalThis.HBProtocol;
@@ -274,17 +276,22 @@ function gapMs() {
   return P.GAP_BASE_MS + P.clampGapExtra(state.settings.gapExtraMs);
 }
 
-// 等价于脚本版 sharedQuery，但刻度改成「上一次请求结束」：站点的冷却从它处理完上一次
-// 请求起算，用「上一次开始」当刻度会在响应慢或手动点击领取时提前发出去，撞上冷却。
-// 刻度落在 storage，worker 被回收也不会让下一次请求提前发出。
+// 限速只针对「口令查询」这条接口——脚本版 sharedQuery 管的正是它：刻度记「上一次口令查询
+// 结束」的时刻，下一次口令查询从这一刻起再等满一个间隔。刻度改成「结束」而不是「开始」是
+// 因为站点的冷却从它处理完上一次请求起算；刻度落在 storage，worker 被回收也不会提前发出。
+//
+// 按 id 只读（开奖看护轮询、详情读取）与 /api/me 不进这条节奏：既不等间隔，也不刷新刻度，
+// 与脚本版里那几处裸 request 一致。扩展一度把这几种只读也塞进限速，代价是后台为一个待开奖
+// 的抽奖每 5 秒轮询一次、把刻度一直顶在「刚刚」：用户闲置再久，提交一条口令也要排在后面显示
+// 「排队中」（v0.11.0 修，见 docs/AGENTS.md 的限速一节）。
 function gapRemainingMs() {
   const last = Number(state.lastFinishedAt) || 0;
   if (last > Date.now()) throw new Error('系统时钟早于共享时间戳，未发送请求');
   return Math.max(0, gapMs() - (Date.now() - last));
 }
 
-// 等到间隔满足才允许发下一次请求。同一次操作里连发的多个请求只在开始前等一次，
-// 期间不刷新刻度，所以「查询 + 领取」依旧是一条挨着一条。
+// 等到「上一次口令查询结束」满一个间隔。一次操作里连发的请求只在开始前等一次，期间不刷新
+// 刻度，所以协议模式的「查询 + 领取」依旧是一条挨着一条。
 async function waitForGap() {
   for (;;) {
     const wait = gapRemainingMs();
@@ -293,7 +300,7 @@ async function waitForGap() {
   }
 }
 
-// 一次请求结束就是新刻度的起点：成功、失败、超时都算结束。
+// 一次口令查询（或一次古法领取的 POST）结束就是新刻度的起点：成功、失败、超时都算结束。
 async function markSettled() {
   state.lastFinishedAt = Date.now();
   try {
@@ -303,9 +310,10 @@ async function markSettled() {
   }
 }
 
-// 一次操作（一条口令的查询与领取、开奖看护轮询、详情读取）从等间隔开始，
-// 到它最后一次请求结束为止。
-async function throttled(task) {
+// 一条口令的「查询 + 领取」算一次操作：从等间隔开始，到它最后一次请求结束为止。走这条路的是
+// 队列里的口令查询（协议模式的领取跟在同一操作里）；古法点击的领取 POST 由 claimPacket 自己
+// 再等一次间隔，与脚本版 claimPacket 的取锁 → waitForGap → POST 一致。
+async function withQueryGap(task) {
   await waitForGap();
   try {
     return await task();
@@ -314,7 +322,7 @@ async function throttled(task) {
   }
 }
 
-// 只读查询本身不参与限速：由外层操作决定何时开始、何时算结束。
+// 只读查询本身不参与限速：口令查询由外层操作等间隔，按 id 只读则完全不等。
 const siteQuery = (url) => siteRequest(url, 'GET');
 
 let sessionPromise = null;
@@ -392,6 +400,22 @@ async function claimPacket(entry, packet) {
   }
 }
 
+// 古法：口令查到可领的红包之后，卡片自己弹出来（脚本版 runEntry / runLotteryEntry 里的
+// showClaimEnvelope / showLotteryEnvelope）。扩展里没有可以贴卡片的网页，对应物就是把领取卡片
+// 开进详情窗口——窗口里只有这一张卡，领取仍然只认卡片上的真实点击（envelope.js 校验
+// event.isTrusted），后台再校验条目状态。弹不出来（比如环境根本不支持开窗）不影响队列与历史，
+// 只是要用户自己点历史行走一趟。
+function popClaimCard(entry) {
+  if (!entry?.packet?.id) return;
+  const cardWindow = globalThis.HBCardWindow;
+  if (!cardWindow) return;
+  Promise.resolve(cardWindow.open({ id: entry.id, entry, packet: entry.packet, view: 'claim' }))
+    .then((result) => {
+      if (result?.ok === false) console.warn('[红包口令面板] 自动弹出红包卡片失败：' + result.error);
+    })
+    .catch(() => {});
+}
+
 async function runEntry(entry) {
   const response = await siteQuery(P.queryUrl(entry.code, entry.charset));
   const outcome = P.queryOutcome(response);
@@ -419,6 +443,7 @@ async function runEntry(entry) {
     entry.lines = lines;
     entry.result = P.linesText(lines);
     await commit();
+    popClaimCard(entry);
     return { awaiting: true, lines };
   }
   return claimPacket(entry, packet);
@@ -456,6 +481,7 @@ async function runLotteryEntry(entry, packet, user) {
     entry.lines = lines;
     entry.result = P.linesText(lines);
     await commit();
+    popClaimCard(entry);
     return { awaiting: true, lines };
   }
   return claimPacket(entry, packet);
@@ -562,24 +588,29 @@ async function settle(entry, outcome) {
 
 async function executeEntry(entry) {
   executing = true;
-  entry.status = 'running';
-  entry.startedAt = Date.now();
-  entry.lines = [P.line('正在查询…', 'muted')];
-  entry.result = '';
-  await commit();
-
   let outcome;
   try {
+    entry.status = 'running';
+    entry.startedAt = Date.now();
+    entry.lines = [P.line('正在查询…', 'muted')];
+    entry.result = '';
+    await commit();
     // 一条口令的「查询 + 领取」算一次操作：从等间隔开始，到最后一次请求结束为止。
-    outcome = await throttled(() => runEntry(entry));
+    outcome = await withQueryGap(() => runEntry(entry));
   } catch (error) {
     outcome = {
       lines: [P.line('查询失败: ' + (error instanceof Error ? error.message : '请求失败') + '。请手动再试。', 'error')],
       pause: true,
     };
+  } finally {
+    // 中途哪一步抛错都要松开队列：executing 卡住会让后面每一条口令都停在「排队中」。
+    executing = false;
   }
-  executing = false;
-  await settle(entry, outcome);
+  try {
+    await settle(entry, outcome);
+  } catch {
+    // 写回失败不改内存里的结论：下一次唤醒按内存与 storage 合并后的结果继续。
+  }
   if (!state.paused) scheduleTick();
 }
 
@@ -600,8 +631,9 @@ async function watchEntry(entry) {
     const packetId = String(entry.packet.id);
     let fresh = null;
     try {
-      // 看护轮询是一次独立操作：等间隔、只读一次、结束即刷新刻度。
-      const response = await throttled(() => siteQuery(P.packetUrl(packetId)));
+      // 看护轮询是一处裸的按 id 只读（脚本版 watchLotteryDraw 里的 request(id, 'GET')）：
+      // 不等口令查询的间隔、也不刷新刻度，节奏由 DRAW_POLL_INTERVAL_MS 决定。
+      const response = await siteQuery(P.packetUrl(packetId));
       fresh = response.status === 200 ? response.response : null;
       // 看护每轮读回的红包就是最新的详情，顺手更新内存副本供面板读取。
       if (P.validPacket(fresh) && String(fresh.id) === packetId) rememberPacket(fresh);
@@ -720,9 +752,9 @@ async function handleClaim(message) {
 }
 
 // 红包详情：详情窗口打开卡片时按 id 读红包本身。内存里有（刚查询过、刚拿到领取回执、看护刚
-// 轮询过）就直接用——详情读取要占一次请求间隔（上一次请求结束起 5 秒 + 加时），能省就省；
-// 没有或要求 refresh 时才补一次网络查询（受限速）。cacheOnly 只问内存、绝不发请求：详情
-// 窗口靠它决定「直接铺卡片」还是「先挂一层 loading 等这次只读查询」。这里永远是 GET。
+// 轮询过）就直接用，省掉一次请求；没有或要求 refresh 时才补一次网络查询（按 id 只读，不进
+// 限速）。cacheOnly 只问内存、绝不发请求：详情窗口靠它决定「直接铺卡片」还是「先挂一层
+// loading 等这次只读查询」。这里永远是 GET。
 async function readPacket(id, options = {}) {
   const key = String(id || '');
   if (!key) return { ok: false, error: '缺少红包 ID' };
@@ -730,8 +762,8 @@ async function readPacket(id, options = {}) {
   if (!packet && options.cacheOnly === true) return { ok: false, error: '内存里没有这个红包的快照' };
   if (!packet || options.refresh === true) {
     try {
-      // 详情刷新同样按一次操作限速：等间隔、只读一次、结束即刷新刻度。
-      const response = await throttled(() => siteQuery(P.packetUrl(key)));
+      // 详情刷新是裸的按 id 只读（脚本版 openEnvelopeCard 里那次 request(id, 'GET')）。
+      const response = await siteQuery(P.packetUrl(key));
       const fresh = response.status === 200 && P.validPacket(response.response)
         && String(response.response.id) === key ? response.response : null;
       if (fresh) packet = rememberPacket(fresh);
@@ -813,7 +845,7 @@ async function syncActionMode() {
 // hb:claim        → { ok, state }（载荷 { id, trusted: true }，真实点击授权后的一次性领取）
 //                   成功时附带 { outcome, packet }：面板详情卡片据此渲染领取金额与记录
 // hb:packet       → { ok, packet }（载荷 { id, refresh, cache }，只读红包本身：cache 只问内存，
-//                   refresh 再发一次只读 GET；详情窗口靠它省下能省的那一次请求间隔）
+//                   refresh 再发一次只读 GET；按 id 只读不进限速，详情窗口靠它省掉能省的请求）
 // hb:void / hb:delete / hb:clear / hb:void-all / hb:resume → { ok, state }
 // hb:session      → { ok, loggedIn, username, linuxdo_id }
 async function handleMessage(message) {

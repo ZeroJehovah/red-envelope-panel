@@ -30,13 +30,11 @@
       const sidePanelOpens = [];
       let closeCalls = 0;
       // 详情窗口的替身记录：面板开窗、拉前、收掉旧窗口的参数都记下来供断言。
-      const CARD_WINDOW_KEY = 'hb-card-window';
       const cardWindows = [];
       const windowUpdates = [];
       const windowRemovals = [];
       const sessionBag = {};
       let nextWindowId = 100;
-      const cardEntryId = (url) => new URL(url).searchParams.get('id');
       window.close = () => { closeCalls += 1; };
       const state = {
         entries: [],
@@ -136,12 +134,18 @@
         windows: {
           getCurrent: async () => ({ id: 1 }),
           // 面板开出去的详情窗口：这里只记参数并把窗口号登记进会话存储（真实浏览器里是窗口
-          // 里的 card.js 自己登记，面板凭这条记录复用窗口）。
+          // 里的 card.js 自己登记——按卡片种类分格，见 card-window.js 的 remember）。照形状
+          // 回放一遍，面板的「复用同一个窗口」逻辑才有据可依。
           create: async (props) => {
             const id = nextWindowId;
             nextWindowId += 1;
             cardWindows.push({ id, ...props });
-            sessionBag[CARD_WINDOW_KEY] = { windowId: id, entryId: cardEntryId(props.url) };
+            const url = new URL(props.url);
+            const view = url.searchParams.get('view') === 'detail' ? 'detail' : 'claim';
+            const bag = sessionBag['hb-card-window'] && typeof sessionBag['hb-card-window'] === 'object'
+              ? sessionBag['hb-card-window'] : {};
+            bag[view] = { windowId: id, entryId: url.searchParams.get('id') };
+            sessionBag['hb-card-window'] = bag;
             return { id, tabs: [{ id: id * 10 }] };
           },
           get: async (id) => {
@@ -163,7 +167,7 @@
     <script src="browser-shim.js"></script>
     <script src="code-rules.js"></script>
     <script src="hb-protocol.js"></script>
-    <script src="envelope.js"></script>
+    <script src="card-window.js"></script>
     <script src="panel.js"></script>
     <script>
       (async () => {
@@ -373,8 +377,8 @@
           await tick();
           const opened = cardWindows[0];
           check('点红包图标开出一个独立窗口', Boolean(opened) && cardWindows.length === 1, JSON.stringify(cardWindows));
-          check('详情窗口指向 card.html 并带上红包 id',
-            Boolean(opened) && opened.url === 'chrome-extension://harness/card.html?id=awaiting-1',
+          check('详情窗口指向 card.html 并带上红包 id 与只读视图',
+            Boolean(opened) && opened.url === 'chrome-extension://harness/card.html?id=awaiting-1&view=detail',
             opened && opened.url);
           check('详情窗口是无标签栏的弹窗',
             Boolean(opened) && opened.type === 'popup' && opened.focused === true,
@@ -414,7 +418,7 @@
           check('换个红包时关掉旧窗口重开一个',
             windowRemovals.includes(opened.id)
             && cardWindows.length === 1
-            && cardWindows[0].url === 'chrome-extension://harness/card.html?id=done-1',
+            && cardWindows[0].url === 'chrome-extension://harness/card.html?id=done-1&view=detail',
             JSON.stringify(cardWindows));
           check('换过之后仍然只有一个详情窗口', cardWindows.length === 1, String(cardWindows.length));
           check('已完结行只给删除动作',

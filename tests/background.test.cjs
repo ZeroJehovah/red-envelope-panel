@@ -96,9 +96,18 @@ async function createEnv({ stored = null, handler } = {}) {
   const popups = [];
   let timerSeq = 0;
 
+  // 详情窗口的替身：够 card-window.js 用——开窗、认活着的窗口、拉到前面、收掉旧窗口，
+  // 以及按卡片种类把窗口号登记进会话存储（真实浏览器里是窗口里的 card.js 自己登记）。
+  const cardWindows = [];
+  const windowUpdates = [];
+  const windowRemovals = [];
+  const sessionBag = {};
+  let windowSeq = 0;
+
   const chrome = {
     runtime: {
       getManifest: () => ({ version: '0.4.0' }),
+      getURL: (assetPath) => 'chrome-extension://harness/' + assetPath,
       onMessage: { addListener: (fn) => listeners.message.push(fn) },
       onInstalled: { addListener: () => {} },
       onStartup: { addListener: () => {} },
@@ -110,12 +119,43 @@ async function createEnv({ stored = null, handler } = {}) {
           for (const [key, value] of Object.entries(bag)) raw.set(key, JSON.parse(JSON.stringify(value)));
         },
       },
+      session: {
+        get: async (key) => (key in sessionBag ? { [key]: sessionBag[key] } : {}),
+        set: async (items) => { Object.assign(sessionBag, items); },
+        remove: async (key) => { delete sessionBag[key]; },
+      },
       onChanged: { addListener: () => {} },
     },
     alarms: {
       create: async (name, info) => { alarms.set(name, info); },
       clear: async (name) => alarms.delete(name),
       onAlarm: { addListener: (fn) => listeners.alarm.push(fn) },
+    },
+    windows: {
+      // 窗口被关掉、或换成别的红包后被收掉：windows.get 就认不到了（等同被关掉）。
+      get: async (id) => {
+        const found = cardWindows.find((item) => item.id === id);
+        if (!found) throw new Error('窗口已关闭');
+        return { id };
+      },
+      create: async (props) => {
+        windowSeq += 1;
+        const id = windowSeq;
+        cardWindows.push({ id, ...props });
+        const url = new URL(props.url);
+        const view = url.searchParams.get('view') === 'detail' ? 'detail' : 'claim';
+        const bag = sessionBag['hb-card-window'] && typeof sessionBag['hb-card-window'] === 'object'
+          ? sessionBag['hb-card-window'] : {};
+        bag[view] = { windowId: id, entryId: url.searchParams.get('id') };
+        sessionBag['hb-card-window'] = bag;
+        return { id };
+      },
+      update: async (id, props) => { windowUpdates.push({ id, ...props }); return { id }; },
+      remove: async (id) => {
+        windowRemovals.push(id);
+        const index = cardWindows.findIndex((item) => item.id === id);
+        if (index >= 0) cardWindows.splice(index, 1);
+      },
     },
     sidePanel: {
       setPanelBehavior: async (behavior) => { panelBehavior.push(JSON.parse(JSON.stringify(behavior))); },
@@ -176,7 +216,13 @@ async function createEnv({ stored = null, handler } = {}) {
     alarms,
     panelBehavior,
     popups,
+    cardWindows,
+    windowUpdates,
+    windowRemovals,
+    sessionBag,
     listeners,
+    // 面板/后台开窗都走这份 HBCardWindow（沙箱里的 globalThis）；自检里直接调它模拟「点历史行」。
+    cardWindow: () => sandbox.globalThis.HBCardWindow,
     async send(message) {
       return new Promise((resolve) => {
         let answered = false;
@@ -333,6 +379,14 @@ test('古法：匹配后停在待开启，点击授权才领取一次', async ()
 
   const id = (await env.send({ type: 'hb:state:get' })).state.entries[0].id;
 
+  // 古法匹配后就该自动弹出领取卡片（脚本版 showClaimEnvelope / showLotteryEnvelope 的对应物）：
+  // 开出来的只有领取卡片那种（view=claim），点历史行进的是另一种只读卡片。
+  assert.equal(env.cardWindows.length, 1, '匹配后自动弹出一张领取卡片');
+  assert.match(env.cardWindows[0].url, /card\.html\?id=.*&view=claim$/, env.cardWindows[0].url);
+  assert.equal(env.cardWindows[0].type, 'popup');
+  assert.deepEqual(env.sessionBag['hb-card-window'].claim,
+    { windowId: env.cardWindows[0].id, entryId: id }, '领取卡片按 kind 登记会话记录');
+
   const denied = await env.send({ type: 'hb:claim', id, trusted: false });
   assert.equal(denied.ok, false);
   assert.equal(denied.error, '缺少有效的领取授权，未发送领取请求');
@@ -360,6 +414,53 @@ test('古法：匹配后停在待开启，点击授权才领取一次', async ()
   const again = await env.send({ type: 'hb:claim', id, trusted: true });
   assert.equal(again.ok, false);
   assert.equal(env.requests.filter((item) => item.method === 'POST').length, 1, '一次点击只放行一次请求');
+});
+
+test('古法：历史点击开只读详情卡片，与自动弹出的领取卡片各占一个窗口', async () => {
+  const env = await createEnv({
+    handler: (url) => {
+      if (url.endsWith('/api/me')) return sessionUser;
+      if (url.endsWith('/grab')) return { status: 200, body: { amount: 1.23 } };
+      return { status: 200, body: ACTIVE_PACKET };
+    },
+  });
+  const submit = await env.send({ type: 'hb:submit', codes: [{ code: HAPPY_CODE, charset: 'text' }], claimMode: 'manual' });
+  await env.flush();
+  const entry = submit.state.entries[0];
+  assert.equal(entry.status, 'awaiting');
+
+  const claimWindow = env.cardWindows[0];
+  assert.ok(claimWindow, '匹配后应自动弹出领取卡片');
+  assert.ok(claimWindow.url.endsWith('view=claim'), claimWindow.url);
+
+  // 点历史行的红包按钮＝只读详情卡片（view=detail），与领取卡片并存、互不顶掉（脚本版里
+  // 历史卡与领取卡也是两张）。
+  const opened = await env.cardWindow().open({ id: entry.id, entry, packet: entry.packet, view: 'detail' });
+  assert.equal(opened.ok, true);
+  assert.equal(opened.action, 'created');
+  const detailWindow = env.cardWindows.find((item) => item.id === opened.windowId);
+  assert.ok(detailWindow && detailWindow.url.endsWith('view=detail'), detailWindow && detailWindow.url);
+  assert.equal(env.cardWindows.length, 2, '领取卡片与详情卡片各占一个窗口');
+
+  // 同一个红包再点一次历史行：把详情卡片拉到前面，不再多开。
+  const repeated = await env.cardWindow().open({ id: entry.id, entry, packet: entry.packet, view: 'detail' });
+  assert.equal(repeated.action, 'focused');
+  assert.equal(repeated.windowId, opened.windowId);
+  assert.equal(env.cardWindows.length, 2, '同一个红包的详情卡片只开一个');
+  assert.ok(env.windowUpdates.some((item) => item.id === repeated.windowId && item.focused === true));
+
+  // 领取之后领取卡片只剩结论，与详情卡片是同一件事：这时点历史行直接聚焦它，不再多开。
+  const approving = env.send({ type: 'hb:claim', id: entry.id, trusted: true });
+  await env.advance(5000);
+  const claimed = await approving;
+  assert.equal(claimed.ok, true);
+  const settled = claimed.state.entries[0];
+  assert.equal(settled.status, 'done');
+  const before = env.cardWindows.length;
+  const focused = await env.cardWindow().open({ id: settled.id, entry: settled, packet: settled.packet, view: 'detail' });
+  assert.equal(focused.action, 'focused');
+  assert.equal(focused.windowId, claimWindow.id, '领取落定后点历史行聚焦那张领取卡片');
+  assert.equal(env.cardWindows.length, before, '领取落定后点历史行不多开窗口');
 });
 
 test('协议：匹配后由后台直接领取', async () => {
@@ -555,19 +656,19 @@ test('详情卡片：领取回执带回结果与红包，详情按 id 只读读�
   assert.equal(env.requests.filter((item) => item.url.endsWith('/api/hongbao/nope')).length, 0,
     'cache 读不发任何请求');
 
-  // refresh 走一次只读 GET，把领取记录补回来，而且不会发写请求。
-  const pending = env.send({ type: 'hb:packet', id: 'p1', refresh: true });
-  await env.advance(5000);
-  const fresh = await pending;
+  // refresh 走一次只读 GET，把领取记录补回来，而且不会发写请求。按 id 只读不进限速：领取刚
+  // 结束（刻度正热）它也立刻发，不用再等一个间隔。
+  const hotClock = env.clock.now;
+  const fresh = await env.send({ type: 'hb:packet', id: 'p1', refresh: true });
   assert.equal(fresh.ok, true);
   assert.deepEqual(plain(fresh.packet.claims.map((claim) => claim.username)), ['carol']);
-  assert.equal(env.requests.filter((item) => item.url.endsWith('/api/hongbao/p1')).length, 1);
+  const detailReads = env.requests.filter((item) => item.url.endsWith('/api/hongbao/p1'));
+  assert.equal(detailReads.length, 1);
+  assert.equal(detailReads[0].at, hotClock, '详情读取不该等口令查询的间隔');
   assert.equal(env.requests.filter((item) => item.method === 'POST').length, 1, '详情读取不发写请求');
 
   // 读不到（也没有缓存）时给一条可读的错误，面板照旧显示本地记录。
-  const missingPending = env.send({ type: 'hb:packet', id: 'nope', refresh: true });
-  await env.advance(5000);
-  const missing = await missingPending;
+  const missing = await env.send({ type: 'hb:packet', id: 'nope', refresh: true });
   assert.equal(missing.ok, false);
   assert.match(missing.error, /读不到红包详情/);
 
@@ -594,10 +695,13 @@ test('古法抽奖：等手动参与，点击只报名一次，开奖后落到�
     mine: 5,
     winners: [{ linuxdo_id: 2, amount: 5, payout_status: 'paid' }],
   };
+  // 看护按 3 秒节奏裸轮询（脚本版 watchLotteryDraw 同节奏）：开奖前 byId 先读回「已报名、
+  // 还没开奖」那一份，什么时候读到开奖结果由 drawnNow 决定，断言就不受轮询时机影响。
+  let drawnNow = false;
   const env = await createEnv({
     handler: lotteryHandler({
       join: () => ({ status: 200, body: { joined: true, already: false, packet: { ...LOTTERY_PACKET, joined: true } } }),
-      byId: () => ({ status: 200, body: drawn }),
+      byId: () => ({ status: 200, body: drawnNow ? drawn : { ...LOTTERY_PACKET, joined: true } }),
     }),
   });
   const submit = await env.send({ type: 'hb:submit', codes: [{ code: LOTTERY_CODE, charset: 'text' }], claimMode: 'manual' });
@@ -608,6 +712,9 @@ test('古法抽奖：等手动参与，点击只报名一次，开奖后落到�
   assert.equal(awaiting.packet.type, 'lottery');
   assert.equal(awaiting.result, '等待手动参与抽选');
   assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0, '古法不自动报名抽奖');
+  // 古法抽奖也自动弹出领取卡片（卡片里是「参与抽选」按钮，脚本版 showLotteryEnvelope）。
+  assert.equal(env.cardWindows.length, 1, '抽奖匹配后也自动弹出领取卡片');
+  assert.match(env.cardWindows[0].url, /view=claim$/, env.cardWindows[0].url);
 
   const joining = env.send({ type: 'hb:claim', id: awaiting.id, trusted: true });
   await env.advance(5000);
@@ -622,7 +729,8 @@ test('古法抽奖：等手动参与，点击只报名一次，开奖后落到�
   assert.equal(joined.state.entries[0].packet.joined, true);
 
   // 看护按 id 读红包，开奖后把中奖结果写回同一行。
-  await env.advance(5000);
+  drawnNow = true;
+  await env.advance(4000);
   const state = await env.send({ type: 'hb:state:get' });
   assert.equal(state.state.entries[0].status, 'done');
   assert.equal(state.state.entries[0].result, '已中奖: +5.00 LDC（已到账）');
@@ -695,11 +803,19 @@ test('重载已报名的抽奖只重新装看护，不重复报名', async () =>
     pausedReason: '',
     lastStartedAt: 0,
   };
+  // 看护装上就按 id 裸轮询（脚本版 watchLotteryDraw 同样一装上就读一次），
+  // 什么时候读到开奖结果由 drawnNow 决定。
+  let drawnNow = false;
   const env = await createEnv({
     stored,
     handler: lotteryHandler({
       join: () => ({ status: 200, body: { joined: true, already: true, packet: null } }),
-      byId: () => ({ status: 200, body: { ...LOTTERY_PACKET, joined: true, status: 'drawn', drawn_at: START + 61000, count: 3, winners: [] } }),
+      byId: () => ({
+        status: 200,
+        body: drawnNow
+          ? { ...LOTTERY_PACKET, joined: true, status: 'drawn', drawn_at: START + 61000, count: 3, winners: [] }
+          : { ...LOTTERY_PACKET, joined: true },
+      }),
       query: () => ({ status: 200, body: { ...LOTTERY_PACKET, joined: true } }),
     }),
   });
@@ -708,11 +824,72 @@ test('重载已报名的抽奖只重新装看护，不重复报名', async () =>
   assert.equal(state.state.entries[0].status, 'awaiting');
   assert.equal(state.state.entries[0].result, '已参与抽选，等待开奖');
   assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0, '已报名的口令不得再次报名');
+  assert.ok(env.requests.filter((item) => item.url.endsWith('/api/hongbao/L1')).length >= 1, '看护没有装回来');
 
-  await env.advance(5000);
+  // 看护读到开奖结果就把结果写回同一行（这条口令不再报名一次）。
+  drawnNow = true;
+  await env.advance(4000);
   const after = await env.send({ type: 'hb:state:get' });
   assert.equal(after.state.entries[0].status, 'done');
   assert.equal(after.state.entries[0].result, '未抽中');
+});
+
+test('按 id 只读不进限速：看护轮询不刷新刻度，闲置很久后提交口令立即发出', async () => {
+  // 历史里留着一条已报名、还没开奖的抽奖：看护会一直按 id 轮询红包本身（脚本版
+  // watchLotteryDraw 同节奏）。按 id 只读与 /api/me 一样不进限速——既不等间隔，也不刷新
+  // 刻度，刻度只由口令查询与领取 POST 推进。v0.11.0 之前扩展把只读也塞进限速：看护每轮询
+  // 一次就把刻度顶到「刚刚」，于是用户闲置再久，提交一条口令也要排在后面显示「排队中」。
+  const pending = { ...LOTTERY_PACKET, joined: true, draw_at: START + 7200_000, server_now: START };
+  const stored = {
+    entries: [entry({
+      id: 'watch-1',
+      code: LOTTERY_CODE,
+      claimMode: 'manual',
+      packetId: 'L1',
+      matched: true,
+      status: 'awaiting',
+      packet: { id: 'L1', type: 'lottery', status: 'active', joined: true, creator: { username: 'alice', linuxdo_id: 1 }, draw_at: START + 7200_000, server_now: START },
+    })],
+    removed: [],
+    settings: {},
+    paused: false,
+    pausedReason: '',
+    lastFinishedAt: START - 600_000,
+  };
+  const env = await createEnv({
+    stored,
+    handler: (url) => {
+      if (url.endsWith('/api/me')) return sessionUser;
+      if (url.endsWith('/api/hongbao/L1')) return { status: 200, body: pending };
+      if (url.includes(encodeURIComponent(LOTTERY_CODE))) return { status: 200, body: pending };
+      return { status: 200, body: { error: '口令不存在' } };
+    },
+  });
+  await env.flush();
+  // worker 醒来会重新查询这条口令（它就是查询接口，所以在这里推进刻度），看护随即装回来。
+  assert.equal((await env.stored()).lastFinishedAt, START, '唤醒后那次重新查询应该结束刻度');
+  await env.advance(1000);
+  assert.ok(env.requests.filter((item) => item.url.endsWith('/api/hongbao/L1')).length >= 1, '看护没有装回来');
+
+  // 用户一小时后才回来用面板：这期间看护一直按 3 秒节奏轮询红包本身。
+  env.clock.now = START + 3600_000;
+  const mark = env.requests.length;
+  await env.advance(30_000);
+  const polls = env.requests.slice(mark).filter((item) => item.url.endsWith('/api/hongbao/L1'));
+  assert.ok(polls.length >= 8, '看护该按 3 秒节奏轮询，实际 ' + polls.length + ' 次');
+  assert.equal(polls[1].at - polls[0].at, 3000, '看护轮询节奏是 3 秒');
+  assert.equal((await env.stored()).lastFinishedAt, START, '看护轮询不得刷新限速刻度');
+
+  // 这时提交一条口令：口令查询立刻发出——上一次查询已经过去一小时，面板不该显示「排队中」。
+  const submitted = await env.send({ type: 'hb:submit', codes: [{ code: HAPPY_CODE, charset: 'text' }], claimMode: 'manual' });
+  assert.equal(submitted.ok, true);
+  await env.flush();
+  const queried = env.requests.filter((item) => item.url.includes(encodeURIComponent(HAPPY_CODE)));
+  assert.equal(queried.length, 1, '新口令的查询该发出去');
+  assert.equal(queried[0].at, env.clock.now, '新口令的查询该立刻发出，不再等一个间隔');
+  const row = (await env.send({ type: 'hb:state:get' })).state.entries
+    .find((item) => item.code === HAPPY_CODE);
+  assert.equal(row.status, 'done', '新口令该立刻查完，而不是停在排队中');
 });
 
 test('停靠/悬浮决定点图标做什么：后台按显示方式切侧边栏行为与 popup', async () => {

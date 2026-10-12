@@ -29,20 +29,8 @@
   const STYLE_HREF = 'envelope.css';
   const POLL_INTERVAL_MS = 4000;   // 卡片开着时的刷新节奏；后台限速会让它不会更密
 
-  // 卡片尺寸（原站设定：普通红包 320×520、抽奖卡 420×640，再乘 --envelope-zoom）。
-  // 红包详情窗口按这个尺寸开窗，卡片才不会被 height: min() 压扁；外层留白照
-  // envelope.css 的 .modal-overlay（左右 padding 各 20，上下 --edge-top 20 / --edge-bottom 24）。
-  const CARD_BASE = {
-    random: { width: 320, height: 520 },
-    lottery: { width: 420, height: 640 },
-  };
-  const CARD_ZOOM = 1.2;         // 与 envelope.css 的 --envelope-zoom 同一个值
-  const CARD_INSET_X = 40;       // .modal-overlay 左右各 20px
-  const CARD_INSET_Y = 44;       // --edge-top 20 + --edge-bottom 24
-  // 窗口外框比视口多出来的那部分（标题栏与边框）：开窗时先按它估外框尺寸，
-  // 详情窗口起来后再用真实差值收紧一次（windows.create 的宽高是外框，不是视口）。
-  const FRAME_ESTIMATE_X = 16;
-  const FRAME_ESTIMATE_Y = 40;
+  // 卡片的显示尺寸与开窗尺寸（windowSize / windowOuterSize）在 card-window.js：面板、后台与
+  // 详情窗口都要用同一份换算，卡片这边只负责画。
 
   // 这里只放卡片「里面」的两块视图：卡片本体由 createNode 建出来，class 已经在了，
   // 若这里再套一层 .redpacket-envelope，卡片的 padding、圆角与 520px 定高会叠两遍。
@@ -613,36 +601,25 @@
       return;
     }
     let stale = false;
-    // 领取成功后补一次详情（领取记录）：只读，失败也不会重发领取。
-    if (!fresh && state.outcome.amount !== undefined && typeof state.onRefresh === 'function') {
-      try {
-        fresh = await state.onRefresh(true);
-      } catch {
-        fresh = null;
-      }
-      if (!fresh) stale = true;
-    }
     if (fresh) state.packet = fresh;
+    // 领取成功先把结论铺出来（金额与自己的那一行分开来）：回执里那份快照是点「开」之前的，
+    // 自己的这一笔还没写进去，所以紧接着补一次只读详情——与脚本版 openEnvelopeCard 同一件事
+    // （成功先落盘，这一读失败也不重发领取）。这一读是一次网络往返，所以先按「领取记录暂未
+    // 更新」画出来，读回来再就地补上领取记录。
+    renderResult(state, state.outcome, state.packet, state.outcome.amount !== undefined);
+    if (state.outcome.amount === undefined || typeof state.onRefresh !== 'function') return;
+    try {
+      fresh = await state.onRefresh(true);
+    } catch {
+      fresh = null;
+    }
+    if (state.closed) return;
+    if (fresh?.id) state.packet = fresh;
+    else stale = true;
     renderResult(state, state.outcome, state.packet, stale);
   }
 
   /* ---------------------------------- 入口 ---------------------------------- */
-
-  // 红包详情窗口要多大的视口（内尺寸），以及开窗时先按多大外框去要。
-  // 卡片的宽度是 min(320px/420px, 100%)，高度是 min(520px/640px, 视口高换算)，所以窗口
-  // 只要给足「卡片显示尺寸 + 遮罩留白」，卡片就是原尺寸，不会被压扁。
-  function windowSize(packet) {
-    const base = P.isLottery(packet) ? CARD_BASE.lottery : CARD_BASE.random;
-    return {
-      width: Math.round(base.width * CARD_ZOOM) + CARD_INSET_X,
-      height: Math.round(base.height * CARD_ZOOM) + CARD_INSET_Y,
-    };
-  }
-
-  function windowOuterSize(packet) {
-    const size = windowSize(packet);
-    return { width: size.width + FRAME_ESTIMATE_X, height: size.height + FRAME_ESTIMATE_Y };
-  }
 
   function show(options = {}) {
     closeCard(true);
@@ -722,7 +699,7 @@
     };
   }
 
-  globalThis.HBEnvelope = { show, close: closeCard, hostId: HOST_ID, windowSize, windowOuterSize };
+  globalThis.HBEnvelope = { show, close: closeCard, hostId: HOST_ID };
 
   // 面板一加载就把样式读好，用户点开卡片时就是同步挂载，不会先亮后暗。
   loadStyles();

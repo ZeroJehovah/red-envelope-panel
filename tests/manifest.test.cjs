@@ -10,15 +10,14 @@ const vm = require('node:vm');
 const root = join(__dirname, '..');
 const manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8'));
 
-// envelope.js 是挂在页面上的 IIFE：给它一个最小沙箱，只为取出卡片尺寸的计算
-// （show/close 要真的碰 DOM，这里不碰）。
-function loadEnvelope() {
+// card-window.js 是挂在页面与后台上的 IIFE：给它一个最小沙箱，只为取出卡片尺寸的换算
+// （open 要真的碰窗口与存储，这里不碰）。
+function loadCardWindow() {
   const sandbox = { console };
   sandbox.globalThis = sandbox;
-  sandbox.HBProtocol = { isLottery: (packet) => packet?.type === 'lottery' };
   const context = vm.createContext(sandbox);
-  vm.runInContext(readFileSync(join(root, 'envelope.js'), 'utf8'), context, { filename: 'envelope.js' });
-  return sandbox.HBEnvelope;
+  vm.runInContext(readFileSync(join(root, 'card-window.js'), 'utf8'), context, { filename: 'card-window.js' });
+  return sandbox.HBCardWindow;
 }
 
 function referencedFiles(spec) {
@@ -102,18 +101,19 @@ test('面板版本号来自清单而不是硬编码', () => {
 });
 
 test('红包详情卡片随包，头像用站点返回的地址', () => {
-  for (const file of ['envelope.js', 'envelope.css', 'card.html', 'card.css', 'card.js']) {
+  for (const file of ['envelope.js', 'envelope.css', 'card-window.js', 'card.html', 'card.css', 'card.js']) {
     assert.ok(existsSync(join(root, file)), file + ' 缺失');
   }
-  // 面板页面也引入 envelope.js，只为拿卡片的窗口尺寸（HBEnvelope.windowSize）；
-  // 卡片本身只在详情窗口 card.html 里渲染。
+  // 面板页面只引入 card-window.js（窗口的开合与卡片尺寸换算）；卡片本身只在详情窗口
+  // card.html 里渲染，所以面板不必背 envelope.js / envelope.css 那一套。
   for (const page of ['popup.html', 'sidepanel.html']) {
     const html = readFileSync(join(root, page), 'utf8');
     assert.match(html, /src="hb-protocol\.js"/, page + ' 未引入协议层');
-    assert.match(html, /src="envelope\.js"/, page + ' 未引入红包卡片');
+    assert.match(html, /src="card-window\.js"/, page + ' 未引入详情窗口');
   }
   const cardPage = readFileSync(join(root, 'card.html'), 'utf8');
   assert.match(cardPage, /src="hb-protocol\.js"/, 'card.html 未引入协议层');
+  assert.match(cardPage, /src="card-window\.js"/, 'card.html 未引入详情窗口');
   assert.match(cardPage, /src="envelope\.js"/, 'card.html 未引入红包卡片');
   assert.match(cardPage, /src="card\.js"/, 'card.html 未引入详情窗口脚本');
   assert.match(cardPage, /href="card\.css"/, 'card.html 未引入窗口外框样式');
@@ -213,9 +213,9 @@ test('红包卡片保持原尺寸，详情窗口按卡片开窗', () => {
   assert.match(css, /--envelope-zoom: 1\.2;/, '卡片缩放不再是原站的 1.2 倍');
   assert.equal(/--envelope-zoom: \.8/.test(css), false, '详情窗口按卡片开窗，不该再按窗口尺寸缩小卡片');
 
-  // 窗口尺寸由 envelope.js 算出来，这里直接跑一遍真实取值：卡片显示尺寸 + .modal-overlay 的
+  // 窗口尺寸由 card-window.js 算出来，这里直接跑一遍真实取值：卡片显示尺寸 + .modal-overlay 的
   // 留白（左右各 20px，上下 20/24px）。开窗时先按外框估尺寸，窗口起来后再用真实差值收紧。
-  const geometry = loadEnvelope();
+  const geometry = loadCardWindow();
   // 沙箱里造出来的对象原型与这边不同，取成数字再比，免得 deepStrictEqual 拿原型说事。
   const sizeOf = (packet) => {
     const size = geometry.windowSize(packet);
@@ -243,30 +243,52 @@ test('红包卡片保持原尺寸，详情窗口按卡片开窗', () => {
 });
 
 test('历史行的开红包走独立详情窗口', () => {
+  // 窗口的开合与卡片尺寸都在 card-window.js：面板点历史行与后台自动弹领取卡片共用同一份。
+  const frame = readFileSync(join(root, 'card-window.js'), 'utf8');
+  // 开小窗口的地址是 card.html?id=…&view=…（view 决定这一副卡片是等着点一下还是只读详情）。
+  assert.match(frame, /const CARD_PAGE = 'card\.html';/, '没有详情页地址');
+  assert.match(frame, /api\.runtime\.getURL\(CARD_PAGE\) \+ '\?id=' \+ encodeURIComponent\(id\) \+ '&view=' \+ view/, '开窗地址没有带上红包 id 与卡片种类');
+  assert.match(frame, /api\.windows\.create\(\{[\s\S]*?url: cardUrl\(id, want\),[\s\S]*?type: 'popup',[\s\S]*?width: size\.width,[\s\S]*?height: size\.height,/, '没有开详情窗口');
+  assert.match(frame, /const size = windowOuterSize\(packet\);/, '开窗尺寸没有按卡片算');
+  // 卡片种类各留一个窗口：窗口号记在会话存储里，还活着就复用（同一张卡片同一个红包拉到前面，
+  // 换了红包把这一种的旧窗口关掉重开），窗口没了才新开一个。
+  assert.match(frame, /const CARD_WINDOW_KEY = 'hb-card-window';/, '缺少详情窗口的记录键');
+  assert.match(frame, /api\.windows\.get\(record\.windowId\)/, '没有确认旧窗口是否还活着');
+  assert.match(frame, /api\.windows\.remove\(current\.id\)/, '换个红包时没有收掉这一种的旧窗口');
+  assert.match(frame, /api\.windows\.update\(windowId, \{ focused: true \}\)/, '没有把已有窗口拉到前面');
+  assert.equal(/api\.tabs\.update\(/.test(frame + readFileSync(join(root, 'panel.js'), 'utf8')), false,
+    '又用 tabs.update 去改已有窗口的地址了（扩展页能不能这样导航不保证）');
+  // 领取卡片与只读详情卡片分开记：领取卡片还等着点击时，点历史行只开/拉详情卡片，不顶掉它。
+  assert.match(frame, /records\[VIEW_CLAIM\]\.entryId === id && !claimable\(entry\)/,
+    '落定的领取卡片没有被当成详情卡片复用');
+
+  // 面板只负责把详情卡片叫起来：卡片尺寸与窗口复用都在 card-window.js。
   const panel = readFileSync(join(root, 'panel.js'), 'utf8');
-  // 点「开红包／参与抽选／查看」= 开一个 card.html?id=… 的小窗口，尺寸按卡片算。
-  assert.match(panel, /const CARD_PAGE = 'card\.html';/, '面板里没有详情页地址');
-  assert.match(panel, /api\.runtime\.getURL\(CARD_PAGE\) \+ '\?id=' \+ encodeURIComponent\(id\)/, '详情窗口没有带上红包 id');
-  assert.match(panel, /api\.windows\.create\(\{ url, type: 'popup', focused: true, width: size\.width, height: size\.height \}\)/, '面板没有开详情窗口');
-  assert.match(panel, /const size = envelope\.windowOuterSize\(entry\.packet\);/, '开窗尺寸没有按卡片算');
+  assert.match(panel, /cardWindow\.open\(\{ id, entry, packet: entry\.packet, view: 'detail' \}\)/, '面板没有开只读详情卡片');
   assert.equal(/envelope\.show\(/.test(panel), false, '面板又在自己的页面里画卡片');
-  // 同一时刻只留一个详情窗口：窗口号记在会话存储里，还活着就复用（同一个红包拉到前面，
-  // 换个红包把旧窗口关掉重开），窗口没了才新开一个。
-  assert.match(panel, /const CARD_WINDOW_KEY = 'hb-card-window';/, '缺少详情窗口的记录键');
-  assert.match(panel, /api\.storage\.session\.get\(CARD_WINDOW_KEY\)/, '面板没有读详情窗口记录');
-  assert.match(panel, /api\.windows\.get\(record\.windowId\)/, '没有确认旧窗口是否还活着');
-  assert.match(panel, /api\.windows\.remove\(existing\.id\)/, '换个红包时没有收掉旧窗口');
-  assert.match(panel, /api\.windows\.update\(existing\.id, \{ focused: true \}\)/, '没有把已有窗口拉到前面');
-  assert.equal(/api\.tabs\.update\(/.test(panel), false, '又用 tabs.update 去改已有窗口的地址了（扩展页能不能这样导航不保证）');
+  assert.equal(/globalThis\.HBEnvelope/.test(panel), false, '面板又借 envelope.js 算尺寸了');
+
+  // 古法：口令查到可领的红包之后卡片自己弹出来（脚本版 showClaimEnvelope / showLotteryEnvelope）。
+  const background = readFileSync(join(root, 'background.js'), 'utf8');
+  assert.match(background, /importScripts\('browser-shim\.js', 'code-rules\.js', 'hb-protocol\.js', 'card-window\.js'\)/, '后台没有引入 card-window.js');
+  assert.match(background, /cardWindow\.open\(\{ id: entry\.id, entry, packet: entry\.packet, view: 'claim' \}\)/, '后台没有自动弹出领取卡片');
 
   const card = readFileSync(join(root, 'card.js'), 'utf8');
-  assert.match(card, /new URLSearchParams\(location\.search\)\.get\('id'\)/, '详情窗口没有从 URL 取红包 id');
+  assert.match(card, /const params = new URLSearchParams\(location\.search\);/, '详情窗口没有解析 URL 参数');
+  assert.match(card, /const entryId = params\.get\('id'\) \|\| '';/, '详情窗口没有从 URL 取红包 id');
   assert.match(card, /envelope\.show\(\{/, '详情窗口没有挂卡片');
+  // 领取动作只挂在「口令查到后自动弹出」的那一副卡片上：URL 带 view=claim 才可领，点历史行
+  // 开出来的只读详情卡片不带领取入口（脚本版 openHistoryPacket 同样从不给历史卡片挂开启按钮）。
+  assert.match(card, /const claimView = params\.get\('view'\) === 'claim';/, '详情窗口没有按 URL 区分卡片种类');
+  assert.match(card, /claimable = claimView && entry\.status === 'awaiting' && entry\.claimMode === 'manual';/,
+    '历史开出来的详情卡片还在带领取入口');
   // 领取与参与照旧回到后台的一次性授权链路：真实点击 → hb:claim（trusted），后台再校验状态。
   assert.match(card, /onWrite: \(\) => send\(\{ type: 'hb:claim', id: entryId, trusted: true \}\)/, '领取与参与没有走后台的一次性授权');
-  // 窗口自己认领：起来时登记窗口号（面板据此复用），关掉时清掉（面板下次新开）。
-  assert.match(card, /api\.storage\.session\.set\(\{ \[CARD_WINDOW_KEY\]: \{ windowId, entryId \} \}\)/, '详情窗口没有登记窗口号');
-  assert.match(card, /api\.storage\.session\.remove\(CARD_WINDOW_KEY\)/, '详情窗口关掉后没有清掉记录');
+  // 窗口自己认领：起来时登记窗口号与卡片种类（面板与后台据此复用），关掉时只清自己那一条。
+  assert.match(card, /cardWindow\.remember\(claimView \? cardWindow\.view\.claim : cardWindow\.view\.detail, \{ windowId, entryId \}\)/,
+    '详情窗口没有登记窗口号');
+  assert.match(card, /cardWindow\.forget\(claimView \? cardWindow\.view\.claim : cardWindow\.view\.detail, entryId\)/,
+    '详情窗口关掉后没有清掉自己那一条记录');
   assert.match(card, /onClose: \(\) => window\.close\(\)/, '关掉卡片没有关窗口');
   // onClose 只认「用户关掉卡片」：show() 换卡片时会先收起上一张，那一次不能把窗口关掉。
   assert.match(readFileSync(join(root, 'envelope.js'), 'utf8'), /closeCard\(replaced\)/, '换卡片与用户关卡片没有区分开');
@@ -291,7 +313,7 @@ test('红包详情窗口在数据回来之前只显示 loading', () => {
     'loading 层没有暗色一套');
 
   // 先问后台内存里的整包快照（刚查询、刚领取回执、看护刚轮询过）：命中就一次请求都不发——
-  // 详情读取要占一次请求间隔（上一次请求结束起 5 秒 + 加时），那正是「点开要等好几秒」的来源。
+  // 那正是「点开要等好几秒」的来源（v0.11.0 起按 id 只读不进限速，省的只是这一趟网络往返）。
   assert.match(card, /readPacket\(packetId, \{ cache: true \}\)/, '详情窗口没有先问后台内存里的整包快照');
   assert.match(background, /cacheOnly: message\.cache === true/, '后台没有 cache-only 读取');
   assert.match(background, /if \(!packet && options\.cacheOnly === true\) return \{ ok: false/,
@@ -304,7 +326,7 @@ test('红包详情窗口在数据回来之前只显示 loading', () => {
   assert.match(card, /await fitWindow\(packet\);\n\s+const handle = envelope\.show\(/,
     '窗口没有在铺卡片之前按卡片尺寸收紧');
   // 快照终究是快照：已经在看结论的卡片（领取记录、参与名单）后台补一次只读刷新；还在等点击的
-  // 卡片别白占一次请求间隔，免得跟用户紧接着的那一次点击抢同一份间隔。
+  // 卡片别白跑一趟，免得跟用户紧接着的那一次点击抢同一份请求。
   assert.match(card, /if \(handle && !claimable\)/, '后台补刷新没有区分卡片是否还在等点击');
 });
 
