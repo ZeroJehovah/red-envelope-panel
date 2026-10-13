@@ -361,6 +361,36 @@ test('红包详情窗口在数据回来之前只显示 loading', () => {
   assert.match(card, /if \(handle && !\(claimView && claimable\)\)/, '后台补刷新没有区分卡片是否还在等点击');
 });
 
+test('普通红包的开启卡片顶部贴一条基础信息', () => {
+  // 用户要的：开启红包那张卡片顶部多一行基础信息（「100.00 LDC | 15 个」），贴顶、满宽。
+  // 只有**开启卡片**铺这一条：抽奖卡片有自己的额度摘要，只读的详情卡片不铺。
+  const js = readFileSync(join(root, 'envelope.js'), 'utf8');
+  const css = readFileSync(join(root, 'envelope.css'), 'utf8');
+  const protocol = readFileSync(join(root, 'hb-protocol.js'), 'utf8');
+
+  assert.match(js, /<div class="envelope-info-bar" id="env-packet-info" hidden><\/div>/,
+    '卡片标记里没有那条基础信息');
+  assert.match(js, /infoBar: options\.detail !== true && options\.viewOnly !== true && !P\.isLottery\(packet\)/,
+    '这条信息没有限定在普通红包的开启卡片上');
+  assert.match(js, /function renderInfoBar\(state\) \{/);
+  assert.match(js, /bar\.textContent = info;\n\s+bar\.hidden = !info;/, '这条信息没有开关（算不出基础信息时该整条藏起来）');
+  // 文案由协议层一处给出（额度两位小数 + 份数），与匹配行那两行同一套写法。
+  assert.match(protocol, /function packetBasicInfo\(data\) \{/);
+  assert.match(protocol, /parts\.push\(total\.toFixed\(2\) \+ ' LDC'\)/);
+  assert.match(protocol, /data\?\.type === 'lottery' \? '抽选 ' \+ count \+ ' 人' : count \+ ' 个'/);
+  assert.match(protocol, /function packetInfoText\(data\) \{\n\s+return \['发自: ' \+ data\.creator\.username, packetKindText\(data\), packetBasicInfo\(data\)\]/,
+    '匹配行那两行没有复用同一份基础信息');
+  // 贴顶、满宽：卡片自己有 34px 上内边距，这条按绝对定位贴着卡片上沿铺满整宽（且不挡点击）。
+  assert.match(css, /\.envelope-info-bar \{\n\s+position: absolute;\n\s+top: 0;\n\s+right: 0;\n\s+left: 0;/,
+    '这条信息没有贴顶铺满');
+  assert.match(css, /\.envelope-info-bar \{[\s\S]*?pointer-events: none;/, '这条信息会挡住卡片上的按钮');
+  // 每次重画都算一遍：先到手的快照可能缺字段，update() 补上后这一条要跟着出现。
+  assert.match(js, /function renderClosed\(state\) \{[\s\S]*?renderInfoBar\(state\);/);
+  // 只有封口视图铺它：点开之后卡片换成原站那张铺满整卡的白底结果面板，这一条自然收了。
+  assert.equal((js.match(/renderInfoBar\(state\);/g) || []).length, 1,
+    '这条信息只该由封口视图铺一次');
+});
+
 test('卡片显示的内容与红包站卡片一致', () => {
   // 逐条对齐 hb.unsnow.org 的 app.js（v=a0a5b8fa）：showEnvelopeResult / renderEnvelopeClaims /
   // renderLottery。上一版把「不是自己领的红包」的金额抹成 null，看起来和原站就差了那一大块数字。

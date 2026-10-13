@@ -11,6 +11,9 @@
  *     从 v0.9.7 起由面板另开一个独立小窗口来放卡片；
  *   - 一次只展示一张卡片，没有脚本版的多卡堆叠与「全部关闭」；
  *   - 关闭卡片不会把条目改写成「未领取」：面板里条目留在「待开启」，可以再次打开；
+ *   - 开启卡片（领取卡片）顶部贴一条红包基础信息——普通红包的额度与份数，形如
+ *     「100.00 LDC | 15 个」（`#env-packet-info`，v0.14.0）：只读的详情卡片与抽奖卡片不铺
+ *     这条（脚本版同步，见 scripts 仓库 `browser/userscripts/LINUXDO.md`）；
  *   - 详情卡片（历史行开出）在条目还等着点一下（古法）时也挂着「开红包」：这件事跟着**条目
  *     状态**走而不是跟着窗口走（v0.13.0），于是关掉自动弹出的那张卡片之后仍能领，不必重新输
  *     一遍口令。脚本版没有这个状态——它关掉卡片就把行记成「未领取: 已关闭红包」，历史卡片**
@@ -39,6 +42,9 @@
   // 这里只放卡片「里面」的两块视图：卡片本体由 createNode 建出来，class 已经在了，
   // 若这里再套一层 .redpacket-envelope，卡片的 padding、圆角与 520px 定高会叠两遍。
   const ENVELOPE_MARKUP = `
+      <!-- 卡片顶部那一条红包基础信息（普通红包的额度与份数）：贴顶、满宽，由 renderInfoBar 填。 -->
+      <div class="envelope-info-bar" id="env-packet-info" hidden></div>
+
       <!-- 封口（未开启）视图 -->
       <div id="envelope-closed-view" style="display: flex; flex-direction: column; align-items: center; justify-content: space-between; height: 100%; width: 100%;">
           <div class="envelope-top">
@@ -283,6 +289,20 @@
 
   /* ------------------------------- 普通红包视图 ------------------------------- */
 
+  // 卡片顶部那条基础信息（「100.00 LDC | 15 个」）：它是**开启卡片**的东西，只铺在普通红包的
+  // 开启卡片上（state.infoBar，见 show()）——抽奖卡片有自己的额度摘要，只读详情卡片不铺。
+  // 它属于卡片的**封口视图**：点「开」之后卡片换成原站那张结果面板（`.envelope-details` 是
+  // 铺满整张卡片的白底），这一条自然收了，不必也不该跟结果面板抢位置。
+  // 红包数据可能先来一份缺字段的快照（update() 再补），所以每次重画都重新算一遍文案，
+  // 两段都算不出来就把整条藏起来。
+  function renderInfoBar(state) {
+    const bar = state.node.querySelector('#env-packet-info');
+    if (!bar) return;
+    const info = state.infoBar ? P.packetBasicInfo(state.packet) : '';
+    bar.textContent = info;
+    bar.hidden = !info;
+  }
+
   function renderClosed(state) {
     const packet = state.packet;
     const node = state.node;
@@ -294,6 +314,7 @@
     set('#env-wish-text', packet.wish || '恭喜发财，大吉大利');
     set('#env-footer-code', packet.code || state.entry?.code || '');
     setAvatar(node.querySelector('#env-creator-avatar'), packet.creator);
+    renderInfoBar(state);
   }
 
   // 领取记录：手气王排在最前，其余按时间倒序（与脚本版 renderEnvelopeClaims 一致）。
@@ -671,6 +692,9 @@
       // 详情卡片：铺结论视图（进度与领取记录），不以封口视图示人；条目还等着点一下时
       // syncDetailAction 会给它补上「开红包」（v0.13.0）。
       detail: options.detail === true,
+      // 顶部那条基础信息只属于**开启卡片**（`view=claim` 的领取卡片）：普通红包铺，
+      // 只读的详情卡片与抽奖卡片都不铺（v0.14.0）。
+      infoBar: options.detail !== true && options.viewOnly !== true && !P.isLottery(packet),
       onWrite: options.onWrite,
       onRefresh: options.onRefresh,
       onClose: options.onClose,

@@ -159,6 +159,33 @@ button:focus-visible {
   z-index: 2;
 }
 
+/* 开启卡片顶部那条红包基础信息（普通红包的额度与份数，如「100.00 LDC | 15 个」）。
+   卡片自己有 34px 的上内边距，这条按绝对定位贴到卡片上沿并铺满整宽，压在那层弧形封口之上；
+   卡片内部的红/金是站点品牌色，不随主题变，所以这条也不分亮暗两套。 */
+.envelope-info-bar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 3;
+  height: 30px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: #fae5ae;
+  background: rgba(0, 0, 0, 0.12);
+  border-bottom: 1px solid rgba(250, 229, 174, 0.24);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* 纯展示：绝不参与命中，免得挡住卡片上的按钮。 */
+  pointer-events: none;
+}
+
 .envelope-top {
   width: 100%;
   padding-top: 48px;

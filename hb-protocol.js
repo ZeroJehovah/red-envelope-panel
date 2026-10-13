@@ -122,15 +122,23 @@
     return PACKET_TYPE_TEXT[data.type] || '红包';
   }
 
-  function packetInfoText(data) {
-    const parts = ['发自: ' + data.creator.username, packetKindText(data)];
-    const total = Number(data.total_amount);
+  // 卡片顶部那一条红包基础信息：额度与份数，形如「100.00 LDC | 15 个」。
+  // 缺一块就少写一块；两块都取不到（应答里既没有总额也没有份数）时返回空串，调用方藏着不铺。
+  function packetBasicInfo(data) {
+    const parts = [];
+    const total = Number(data?.total_amount);
     if (Number.isFinite(total)) parts.push(total.toFixed(2) + ' LDC');
-    const count = Number(data.count);
+    const count = Number(data?.count);
     if (Number.isFinite(count) && count > 0) {
-      parts.push(data.type === 'lottery' ? '抽选 ' + count + ' 人' : count + ' 个');
+      parts.push(data?.type === 'lottery' ? '抽选 ' + count + ' 人' : count + ' 个');
     }
     return parts.join(' | ');
+  }
+
+  function packetInfoText(data) {
+    return ['发自: ' + data.creator.username, packetKindText(data), packetBasicInfo(data)]
+      .filter(Boolean)
+      .join(' | ');
   }
 
   // 匹配行的两行都标绿：口令确实匹配到了红包。
@@ -366,6 +374,7 @@
     lotteryPayoutText,
     packetSnapshot,
     matchLines,
+    packetBasicInfo,
     packetMetricValue,
     packetStatusText,
     queryOutcome,

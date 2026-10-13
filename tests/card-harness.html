@@ -18,6 +18,9 @@
        card-harness.html?id=hp6              待开启的普通红包点历史行开出的详情卡片（自己也留着「开红包」）
        card-harness.html?id=missing          条目不在时的兜底说明
 
+     普通红包的**开启卡片**（hp1）顶部还贴一条红包基础信息（「100.00 LDC | 5 个」）；
+     只读详情卡片与抽奖卡片（hp2 ～ hp6）不铺这一条。
+
      无头运行示例（窗口至少 424×668，卡片才铺到原尺寸 384×624）：
        chrome.exe --headless=new --disable-gpu --virtual-time-budget=8000 \
          --window-size=560,900 \
@@ -57,7 +60,8 @@
       const packetDetails = {
         hp1: {
           id: 'hp1', type: 'random', status: 'active', code: '11775521', wish: '恭喜发财，大吉大利',
-          creator: { username: 'alice', linuxdo_id: 1 }, count: 5, claimed_count: 2, claimed_amount: 1.23,
+          creator: { username: 'alice', linuxdo_id: 1 }, total_amount: 100, count: 5,
+          claimed_count: 2, claimed_amount: 1.23,
           claims: [{ share_id: 7, username: 'carol', amount: 1.23, at: 2 }],
         },
         hp2: {
@@ -87,7 +91,8 @@
         },
         hp6: {
           id: 'hp6', type: 'random', status: 'active', code: '11775521', wish: '恭喜发财，大吉大利',
-          creator: { username: 'alice', linuxdo_id: 1 }, count: 5, claimed_count: 2, claimed_amount: 1.23,
+          creator: { username: 'alice', linuxdo_id: 1 }, total_amount: 100, count: 5,
+          claimed_count: 2, claimed_amount: 1.23,
           claims: [{ share_id: 7, username: 'carol', amount: 1.23, at: 2 }],
         },
       };
@@ -272,6 +277,27 @@
               const wantRefresh = entryId === 'hp3' || entryId === 'hp4' || entryId === 'hp6' ? 1 : 0;
               check(wantRefresh ? '看过结论的卡片在后台补一次刷新' : '还在等点击的卡片不在后台多跑一趟',
                 refreshReads().length === wantRefresh, JSON.stringify(packetReads()));
+            }
+
+            // 普通红包的开启卡片顶部贴一条基础信息（额度 | 份数，v0.14.0）；抽奖卡片与只读的
+            // 详情卡片不铺这一条——即使包里带着总额与份数（hp6 就有）。
+            {
+              const infoBar = inCard('#env-packet-info');
+              const shown = Boolean(infoBar) && infoBar.hidden === false;
+              if (entryId === 'hp1') {
+                check('开启卡片顶部贴一条红包基础信息',
+                  shown && String(infoBar.textContent) === '100.00 LDC | 5 个',
+                  infoBar ? (infoBar.textContent + ' hidden=' + infoBar.hidden) : '没有这一条');
+                const cardBox = card().getBoundingClientRect();
+                const barBox = infoBar.getBoundingClientRect();
+                check('这条信息贴顶且铺满整宽',
+                  Math.abs(barBox.top - cardBox.top) <= 1 && Math.abs(barBox.width - cardBox.width) <= 1,
+                  Math.round(barBox.top - cardBox.top) + 'px 上边距，' + Math.round(barBox.width) + ' / '
+                  + Math.round(cardBox.width) + 'px 宽');
+              } else {
+                check('抽奖卡片与只读详情卡片不铺这条基础信息', !shown,
+                  infoBar ? (infoBar.textContent + ' hidden=' + infoBar.hidden) : '没有这一条');
+              }
             }
 
             if (entryId === 'hp6') {
