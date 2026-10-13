@@ -414,6 +414,33 @@ test('古法：匹配后停在待开启，点击授权才领取一次', async ()
   assert.equal(env.requests.filter((item) => item.method === 'POST').length, 1, '一次点击只放行一次请求');
 });
 
+// 刻度只写「口令查询结束」那一刻（脚本版 sharedQuery 的 finally 与这里同义）。操作里跟在
+// 查询后面的协议领取 POST 再慢，也不把下一次查询往后推（v0.12.2）。
+test('协议领取：领取 POST 慢 3 秒，刻度仍停在口令查询结束那一刻', async () => {
+  const env = await createEnv({
+    handler: (url) => {
+      if (url.endsWith('/api/me')) return sessionUser;
+      if (url.endsWith('/grab')) return { status: 200, body: { amount: 2.5 }, wait: 3000 };
+      return { status: 200, body: ACTIVE_PACKET };
+    },
+  });
+  await env.send({ type: 'hb:submit', codes: [{ code: HAPPY_CODE, charset: 'text' }], claimMode: 'direct' });
+  await env.flush();
+
+  const query = env.requests.find((item) => item.url.includes('/text-code/'));
+  assert.ok(query, '先发一次口令查询');
+  const posted = env.requests.filter((item) => item.method === 'POST');
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].at, query.at, '协议领取紧跟在查询后面发出，不额外等一个间隔');
+  assert.equal((await env.stored()).lastFinishedAt, query.at, '刻度在查询结束时就已经写下');
+
+  await env.advance(3000);
+  const stored = await env.stored();
+  assert.equal(stored.entries[0].status, 'done');
+  assert.equal(stored.entries[0].result, '领取成功: +2.50 LDC');
+  assert.equal(stored.lastFinishedAt, query.at, '领取 POST 的耗时不算进间隔');
+});
+
 test('古法：历史点击开只读详情卡片，与自动弹出的领取卡片各占一个窗口', async () => {
   const env = await createEnv({
     handler: (url) => {

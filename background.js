@@ -328,7 +328,8 @@ function gapMs() {
 // 「排队中」（v0.11.0 修，见 docs/AGENTS.md 的限速一节）。
 //
 // 领取的那次 POST 同样不进这条节奏（v0.12.1）：间隔是给「输入口令」这条接口定的，古法由
-// 点击触发，点下去就当场发出去，既不等间隔也不刷新刻度——正与按 id 只读同一种待遇。
+// 点击触发，点下去就当场发出去，既不等间隔也不刷新刻度——正与按 id 只读同一种待遇。协议
+// 模式的领取跟在查询后面，但刻度落在查询结束那一刻（v0.12.2），不被 POST 拖到它结束之后。
 function gapRemainingMs() {
   const last = Number(state.lastFinishedAt) || 0;
   if (last > Date.now()) throw new Error('系统时钟早于共享时间戳，未发送请求');
@@ -345,7 +346,8 @@ async function waitForGap() {
   }
 }
 
-// 一次口令查询结束就是新刻度的起点：成功、失败、超时都算结束。
+// 一次口令查询结束就是新刻度的起点：成功、失败、超时都算结束。刻度的写入点只有这一处，
+// 与脚本版 sharedQuery 的 finally 同一位置——脚本版那边领取走的是裸 request，同样不碰它。
 async function markSettled() {
   state.lastFinishedAt = Date.now();
   try {
@@ -355,19 +357,26 @@ async function markSettled() {
   }
 }
 
-// 一条口令的「查询 + 领取」算一次操作：从等间隔开始，到它最后一次请求结束为止。走这条路的是
-// 队列里的口令查询——协议模式的领取跟在同一次操作里，所以它也不额外多等一个间隔。
+// 一条口令的「查询 + 领取」算一次操作：从等间隔开始，到查完为止。走这条路的是队列里的口令
+// 查询——协议模式的领取跟在同一次操作里，所以它也不额外多等一个间隔。
 async function withQueryGap(task) {
   await waitForGap();
+  return task();
+}
+
+// 只读 GET 的唯一入口：口令查询由 queryCode 等间隔并落刻度，按 id 只读（看护轮询、详情
+// 读取）完全不等。
+const siteQuery = (url) => siteRequest(url, 'GET');
+
+// 口令查询是这条节奏唯一的对象：请求一结束（成功、失败、超时都算）就把刻度落到这一刻，
+// 因此操作里跟在它后面的协议领取 POST 不会把下一次查询往后推（v0.12.2）。
+async function queryCode(code, charset) {
   try {
-    return await task();
+    return await siteQuery(P.queryUrl(code, charset));
   } finally {
     await markSettled();
   }
 }
-
-// 只读查询本身不参与限速：口令查询由外层操作等间隔，按 id 只读则完全不等。
-const siteQuery = (url) => siteRequest(url, 'GET');
 
 let sessionPromise = null;
 
@@ -482,7 +491,7 @@ function popClaimCard(entry) {
 }
 
 async function runEntry(entry) {
-  const response = await siteQuery(P.queryUrl(entry.code, entry.charset));
+  const response = await queryCode(entry.code, entry.charset);
   const outcome = P.queryOutcome(response);
   if (!outcome.matched) return outcome;
 
