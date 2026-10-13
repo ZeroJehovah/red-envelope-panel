@@ -7,14 +7,15 @@
      HARNESS-FAIL。
 
      URL 上的 view 决定卡片种类（card.js）：view=claim 是等着点一下的领取卡片，缺省或
-     view=detail 是只读的详情卡片。
+     view=detail 是点历史行开出的详情卡片。能否领取跟着**条目状态**走（v0.13.0），待开启
+     的条目即便开的是详情卡片也留着「开红包」。
 
        card-harness.html?id=hp1&view=claim   待开启的普通红包（领取卡片，可领）
        card-harness.html?id=hp2&view=claim   抽奖红包（领取卡片，未报名）
        card-harness.html?id=hp3              已领取完的历史红包（详情卡片）
        card-harness.html?id=hp4              已领完且自己没领到（金额显示 0.00，详情卡片）
        card-harness.html?id=hp5              后台内存里没有、要等一次只读查询（先看 loading，详情卡片）
-       card-harness.html?id=hp6              待开启的普通红包但开成只读详情卡片（点历史行那种：不带领取入口）
+       card-harness.html?id=hp6              待开启的普通红包点历史行开出的详情卡片（自己也留着「开红包」）
        card-harness.html?id=missing          条目不在时的兜底说明
 
      无头运行示例（窗口至少 424×668，卡片才铺到原尺寸 384×624）：
@@ -123,7 +124,7 @@
             packetId: 'hp5', matched: true, createdAt: 5,
           },
           {
-            // 待开启，但这次是按「点历史行」的方式打开的：给的是只读详情卡片。
+            // 待开启，这次是按「点历史行」的方式打开的：给的是详情卡片（能不能领跟着条目状态走）。
             id: 'hp6', code: '11775521', charset: 'numeric', claimMode: 'manual', status: 'awaiting',
             result: '等待手动开启', lines: [{ text: '等待手动开启', tone: 'muted' }],
             packet: { id: 'hp6', type: 'random', status: 'active', code: '11775521', creator: { username: 'alice', linuxdo_id: 1 } },
@@ -195,7 +196,7 @@
         const click = (node) => node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         const lottery = entryId === 'hp2';
         // 卡片种类（card.js 的 view 参数）：hp1（待开启的普通红包）与 hp2（未报名的抽奖）走
-        // 领取卡片，其余 id 是只读的详情卡片。
+        // 领取卡片，其余 id 是详情卡片（hp6 是待开启的条目，详情卡片自己也留着领取入口）。
         const viewKind = entryId === 'hp1' || entryId === 'hp2' ? 'claim' : 'detail';
         const claims = (type) => sent.filter((message) => message.type === type);
         const packetReads = () => sent.filter((message) => message.type === 'hb:packet');
@@ -274,18 +275,30 @@
             }
 
             if (entryId === 'hp6') {
-              // 点历史行开出来的只读详情卡片：即便这个红包还等着点一下，卡片也不露开启入口，
-              // 对着那个藏起来的开启按钮来一发合成点击同样不会发领取请求（viewOnly 挡在 runWrite 门口）。
-              check('只读详情卡片不露出开启入口',
+              // 点历史行开出来的详情卡片：铺的是进度与领取记录，不摆封口视图；但这个红包还等着
+              // 点一下（古法），所以卡片自己留着「开红包」——关掉后台自动弹出的那张卡片之后仍能领
+              // （v0.13.0 起领取入口跟着条目状态走，不跟着卡片种类走）。
+              check('详情卡片不摆封口视图',
                 Boolean(inCard('#envelope-closed-view')) && inCard('#envelope-closed-view').style.display === 'none',
                 inCard('#envelope-closed-view') && inCard('#envelope-closed-view').style.display);
-              check('只读详情卡片直接给出结论视图',
+              check('待开启条目开出的详情卡片直接给出结论视图',
                 Boolean(inCard('#envelope-opened-view')) && inCard('#envelope-opened-view').style.display === 'flex'
                 && String((inCard('#env-opened-title') || {}).textContent || '') === '来自 alice 的红包',
                 inCard('#env-opened-title') && inCard('#env-opened-title').textContent);
-              if (inCard('#btn-open-packet')) click(inCard('#btn-open-packet'));
+              check('详情卡片铺出领取进度与领取记录',
+                Boolean(inCard('#env-claimed-count')) && inCard('#env-claimed-count').textContent === '2 / 5'
+                && Boolean(inCard('#env-claims-list'))
+                && inCard('#env-claims-list').querySelectorAll('.envelope-claim-row').length === 1,
+                inCard('#env-claimed-count') && inCard('#env-claimed-count').textContent);
+              check('还等着点一下的条目在详情卡片里留着「开红包」',
+                Boolean(inCard('#btn-open-packet-detail')) && inCard('#btn-open-packet-detail').hidden === false
+                && inCard('#btn-open-packet-detail').textContent === '开红包',
+                inCard('#btn-open-packet-detail') && inCard('#btn-open-packet-detail').textContent);
+              // 合成点击在 envelope.js 的 runWrite 门口就被 isTrusted 挡下，落到后台的写请求为 0。
+              if (inCard('#btn-open-packet-detail')) click(inCard('#btn-open-packet-detail'));
               await tick();
-              check('只读详情卡片点了也不发领取请求', claims('hb:claim').length === 0, JSON.stringify(claims('hb:claim')));
+              check('合成点击不授权领取（isTrusted 校验）',
+                claims('hb:claim').length === 0, JSON.stringify(claims('hb:claim')));
             }
 
             if (entryId === 'hp1') {
@@ -327,6 +340,7 @@
                 && inCard('#env-claims-list').querySelectorAll('.envelope-claim-row').length === 1);
               check('收起封口视图',
                 Boolean(inCard('#envelope-closed-view')) && inCard('#envelope-closed-view').style.display === 'none');
+              check('已经落定的条目不再给开启入口', !inCard('#btn-open-packet-detail'));
             }
 
             if (entryId === 'hp4') {

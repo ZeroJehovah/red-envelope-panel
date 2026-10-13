@@ -288,11 +288,11 @@ test('历史行的开红包走独立详情窗口', () => {
 
   // 面板只负责把详情卡片叫起来：卡片尺寸与窗口复用都在 card-window.js。
   const panel = readFileSync(join(root, 'panel.js'), 'utf8');
-  // 历史行开哪一种卡片由条目状态决定：还等着点一下的（待开启 + 古法 + 抽奖未报名）开领取卡片
-  // ——后台只在「这一次刚查到可领」时弹卡，唤醒不再补弹（v0.11.1），历史行是回到那张卡片的
-  // 唯一入口；其余条目一律只读详情卡片（脚本版 openHistoryPacket 同视图）。
-  assert.match(panel, /const view = cardWindow\.claimable\(entry\) \? 'claim' : 'detail';/, '面板没有按条目状态挑卡片种类');
-  assert.match(panel, /cardWindow\.open\(\{ id, entry, packet: entry\.packet, view \}\)/, '面板没有把挑好的卡片种类交给开窗');
+  // 历史行一律开详情卡片（v0.13.0 起）：这个按钮叫「查看红包详情」，点它就该看到详情，不再按
+  // 条目状态换成领取卡片；领取入口跟着条目状态走，由那张详情卡片自己挂（见 envelope.js 的
+  // syncDetailAction）。领取卡片只由后台在「这一次刚查到可领」时自动弹出。
+  assert.equal(/claimable\(entry\) \? 'claim'/.test(panel), false, '面板又按条目状态挑卡片种类了');
+  assert.match(panel, /cardWindow\.open\(\{ id, entry, packet: entry\.packet, view: 'detail' \}\)/, '面板没有把详情卡片交给开窗');
   assert.equal(/envelope\.show\(/.test(panel), false, '面板又在自己的页面里画卡片');
   assert.equal(/globalThis\.HBEnvelope/.test(panel), false, '面板又借 envelope.js 算尺寸了');
 
@@ -305,11 +305,13 @@ test('历史行的开红包走独立详情窗口', () => {
   assert.match(card, /const params = new URLSearchParams\(location\.search\);/, '详情窗口没有解析 URL 参数');
   assert.match(card, /const entryId = params\.get\('id'\) \|\| '';/, '详情窗口没有从 URL 取红包 id');
   assert.match(card, /envelope\.show\(\{/, '详情窗口没有挂卡片');
-  // 领取动作只挂在「等着点一下」的那一副卡片上：URL 带 view=claim、条目仍是待开启、包里没有
-  // 报名记录才可领；只读详情卡片不带领取入口（脚本版 openHistoryPacket 同样从不给历史卡片挂
-  // 开启按钮）。判据与 card-window.js 共一份，别在两处各写一套。
+  // 领取入口跟着**条目状态**走，不跟着卡片种类走（v0.13.0）：条目仍是待开启、包里没有报名记录
+  // 时才可领，详情卡片也一样挂着入口。判据与 card-window.js 共一份，别在两处各写一套。
   assert.match(card, /const claimView = params\.get\('view'\) === 'claim';/, '详情窗口没有按 URL 区分卡片种类');
-  assert.match(card, /claimable = claimView && cardWindow\.claimable\(entry\);/, '领取入口的判据没有和开窗那一份共用');
+  assert.match(card, /claimable = cardWindow\.claimable\(entry\);/, '领取入口的判据没有和开窗那一份共用');
+  assert.match(card, /detail: !claimView,/, '详情窗口没有铺结论视图');
+  assert.match(readFileSync(join(root, 'envelope.js'), 'utf8'), /function syncDetailAction\(state\) \{/,
+    '详情卡片里没有领取入口（条目还等着点一下时就该有）');
   // 领取与参与照旧回到后台的一次性授权链路：真实点击 → hb:claim（trusted），后台再校验状态。
   assert.match(card, /onWrite: \(\) => send\(\{ type: 'hb:claim', id: entryId, trusted: true \}\)/, '领取与参与没有走后台的一次性授权');
   // 窗口自己认领：起来时登记窗口号与卡片种类（面板与后台据此复用），关掉时只清自己那一条。
@@ -353,9 +355,10 @@ test('红包详情窗口在数据回来之前只显示 loading', () => {
   // 窗口尺寸在铺卡片之前按真实红包收紧：这会儿窗口里还是 loading，缩放看不见。
   assert.match(card, /await fitWindow\(packet\);\n\s+const handle = envelope\.show\(/,
     '窗口没有在铺卡片之前按卡片尺寸收紧');
-  // 快照终究是快照：已经在看结论的卡片（领取记录、参与名单）后台补一次只读刷新；还在等点击的
-  // 卡片别白跑一趟，免得跟用户紧接着的那一次点击抢同一份请求。
-  assert.match(card, /if \(handle && !claimable\)/, '后台补刷新没有区分卡片是否还在等点击');
+  // 快照终究是快照：已经在看结论的卡片（领取记录、参与名单）后台补一次只读刷新；还等着点一下的
+  // 那张**封口视图**别白跑一趟，免得跟用户紧接着的那一次点击抢同一份请求（详情卡片铺的是进度
+  // 与领取记录，照旧补一次）。
+  assert.match(card, /if \(handle && !\(claimView && claimable\)\)/, '后台补刷新没有区分卡片是否还在等点击');
 });
 
 test('卡片显示的内容与红包站卡片一致', () => {

@@ -16,7 +16,9 @@
  * URL 上的 view 决定这一副卡片是哪一种：view=claim 是「等着点一下」的领取卡片（口令查到可领的
  * 红包后由后台自动弹出，对应脚本版 showClaimEnvelope / showLotteryEnvelope），没有这个参数或
  * view=detail 就是只读的详情卡片（点历史行的红包按钮开出，对应脚本版 openHistoryPacket）。
- * 领取动作只挂在领取卡片上：历史开出来的详情卡片从不带领取入口。
+ * v0.13.0 起领取入口跟着**条目状态**走而不是跟着卡片种类走：条目还等着点一下（古法）时，
+ * 详情卡片也留着「开红包」——关掉自动弹出的那张领取卡片之后仍能领，不必重新输一遍口令
+ * （脚本版没有这个状态：它关掉卡片就把行记成「未领取: 已关闭红包」，历史卡片永远只读）。
  *
  * v0.9.12 起窗口不再「先铺卡片、再慢慢补数据」：后台内存里已经有这包的整包快照（刚查询、刚领
  * 取回执、开奖看护刚轮询过）就直接铺卡片，一次请求都不发；内存里没有就先只显示一层 loading，
@@ -135,6 +137,8 @@
       packet,
       user: user || null,
       viewOnly: !claimable,
+      // 详情卡片铺结论视图（进度与领取记录）；领取卡片仍是封口视图，点「开」才领。
+      detail: !claimView,
       // 领取／参与只是把这次真实点击转成一条 hb:claim，授权判定仍在后台。
       onWrite: () => send({ type: 'hb:claim', id: entryId, trusted: true }),
       onRefresh: (network) => readPacket(packetId, { refresh: network === true }),
@@ -173,8 +177,9 @@
     }
     await rememberWindow();
     packetId = entry.packet.id;
-    // 领取入口只挂在领取卡片上，而且条目得还等着点一下（判据与 card-window.js 的 claimable 同一份）。
-    claimable = claimView && cardWindow.claimable(entry);
+    // 领取入口跟着条目状态走：条目还等着点一下（古法）就有（判据与 card-window.js 的 claimable
+    // 同一份，面板与后台自动弹卡也用它）。历史行开出来的详情卡片因此同样能领。
+    claimable = cardWindow.claimable(entry);
 
     // 先问后台内存里有没有这包的整包快照（刚查询、刚领取回执、开奖看护刚轮询过）。有就直接
     // 拿它铺卡片，一次请求都不发（按 id 只读不进限速，省下的是这一趟网络往返）。会话查询同时出发，不挡显示。
@@ -197,9 +202,10 @@
 
     const handle = await showCard(cached, user);
     // 快照终究是快照：已经在看结论的卡片（领取记录、参与名单）在后台补一次只读刷新，回来就地
-    // 更新。还在等点击的卡片没有要补的字段——封口视图只看发件人与口令，抽奖卡由自己的轮询接着
-    // 刷新，也没必要在用户紧接着点「开」之前多跑一趟。
-    if (handle && !claimable) {
+    // 更新。还在等点击的那张**封口视图**没有要补的字段（只看发件人与口令，抽奖卡由自己的轮询
+    // 接着刷新），也没必要在用户紧接着点「开」之前多跑一趟；历史行开出来的详情卡片铺的是进度
+    // 与领取记录，照旧补一次。
+    if (handle && !(claimView && claimable)) {
       readPacket(packetId, { refresh: true }).then((latest) => {
         if (latest?.id) handle.update({ packet: latest });
       }, () => {

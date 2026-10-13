@@ -403,6 +403,36 @@ button:focus-visible {
   text-align: center;
 }
 
+/* 详情卡片里的领取入口（条目还等着点一下时才出现）：沿用封口视图那颗「开」的金色，压在
+   「确定」上面——动作在上、关闭在下。 */
+.envelope-detail-open {
+  width: 100%;
+  min-height: 38px;
+  margin-bottom: 8px;
+  border: 0;
+  border-radius: 6px;
+  color: #a53a2d;
+  background: #fae5ae;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--duration-fast) ease, transform var(--duration-fast) ease;
+}
+
+.envelope-detail-open:hover {
+  background: #fff0c8;
+}
+
+.envelope-detail-open:active {
+  transform: scale(0.98);
+}
+
+.envelope-detail-open:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
 .envelope-close-btn {
   width: 100%;
   min-height: 38px;
