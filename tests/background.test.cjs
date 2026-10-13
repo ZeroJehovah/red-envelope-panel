@@ -479,6 +479,109 @@ test('协议：匹配后由后台直接领取', async () => {
   assert.equal(submit.state.entries[0].claimMode, 'direct');
 });
 
+// 动态模式：口令查到红包之后才谈得上判定——总额／人均都是站点回包里的字段。
+test('动态：人均达到阈值就走协议（等于阈值也算达标）', async () => {
+  const env = await createEnv({
+    handler: (url) => {
+      if (url.endsWith('/api/me')) return sessionUser;
+      if (url.endsWith('/grab')) return { status: 200, body: { amount: 2.5 } };
+      return { status: 200, body: ACTIVE_PACKET };
+    },
+  });
+  // ACTIVE_PACKET 是总额 10、5 份：人均 2.00，阈值正好 2.00。
+  await env.send({
+    type: 'hb:state:patch',
+    patch: { settings: { claimMode: 'dynamic', claimMetric: 'average', claimThreshold: 2 } },
+  });
+  const submit = await env.send({ type: 'hb:submit', codes: [{ code: HAPPY_CODE, charset: 'text' }], claimMode: 'dynamic' });
+  await env.flush();
+
+  const entry = plain(submit.state.entries[0]);
+  const texts = entry.lines.map((item) => item.text);
+  assert.equal(entry.status, 'done');
+  assert.equal(entry.claimMode, 'direct', '判定结果落回条目，不再是 dynamic');
+  assert.ok(texts.includes('动态：人均 2.00 LDC ≥ 阈值 2.00，自动协议领取'), JSON.stringify(texts));
+  assert.equal(texts[texts.length - 1], '领取成功: +2.50 LDC', '判定行在前，领取结果在后');
+  assert.equal(env.requests.filter((item) => item.method === 'POST').length, 1, '达标才发这一次写请求');
+});
+
+test('动态：达不到阈值转古法，弹卡片等真实点击', async () => {
+  const env = await createEnv({
+    handler: (url) => {
+      if (url.endsWith('/api/me')) return sessionUser;
+      if (url.endsWith('/grab')) return { status: 200, body: { amount: 1.23 } };
+      return { status: 200, body: ACTIVE_PACKET };
+    },
+  });
+  // 按总额判：10.00 < 30.00，转古法。
+  await env.send({
+    type: 'hb:state:patch',
+    patch: { settings: { claimMode: 'dynamic', claimMetric: 'total', claimThreshold: 30 } },
+  });
+  const submit = await env.send({ type: 'hb:submit', codes: [{ code: HAPPY_CODE, charset: 'text' }], claimMode: 'dynamic' });
+  await env.flush();
+
+  const entry = plain(submit.state.entries[0]);
+  assert.equal(entry.status, 'awaiting');
+  assert.equal(entry.claimMode, 'manual', '转古法后条目就是 manual，领取卡片与 hb:claim 才认它');
+  assert.equal(entry.result, '等待手动开启');
+  assert.ok(entry.lines.map((item) => item.text).includes('动态：总额 10.00 LDC < 阈值 30.00，转古法手动开启'));
+  assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0, '不达标不发写请求');
+  assert.equal(env.cardWindows.length, 1, '转古法照旧自动弹领取卡片');
+  assert.match(env.cardWindows[0].url, /view=claim$/);
+
+  // 走的是古法那条路：卡片上的真实点击仍然能领取。
+  const approving = env.send({ type: 'hb:claim', id: entry.id, trusted: true });
+  await env.flush();
+  await env.advance(5000);
+  const claimed = await approving;
+  assert.equal(claimed.ok, true);
+  assert.equal(plain(claimed.state.entries[0]).status, 'done', '点击后照旧领取成功');
+});
+
+test('动态：算不出人均（红包没有份数）时转古法，阈值 0 也不自动领取', async () => {
+  const env = await createEnv({
+    handler: (url) => {
+      if (url.endsWith('/api/me')) return sessionUser;
+      return { status: 200, body: { ...ACTIVE_PACKET, count: null } };
+    },
+  });
+  await env.send({
+    type: 'hb:state:patch',
+    patch: { settings: { claimMode: 'dynamic', claimMetric: 'average', claimThreshold: 0 } },
+  });
+  const submit = await env.send({ type: 'hb:submit', codes: [{ code: HAPPY_CODE, charset: 'text' }], claimMode: 'dynamic' });
+  await env.flush();
+
+  const entry = plain(submit.state.entries[0]);
+  assert.equal(entry.status, 'awaiting');
+  assert.equal(entry.claimMode, 'manual');
+  assert.ok(entry.lines.map((item) => item.text).includes('动态：人均 未知 < 阈值 0.00，转古法手动开启'));
+  assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0, '判定量取不到就不发写请求');
+});
+
+test('唤醒时动态条目保持 dynamic，等口令查回来才判定', async () => {
+  const stored = {
+    entries: [entry({ id: 'dyn-1', status: 'queued', claimMode: 'dynamic' })],
+    removed: [],
+    settings: { claimMode: 'dynamic', claimMetric: 'average', claimThreshold: 3 },
+    paused: false,
+    pausedReason: '',
+    lastFinishedAt: 0,
+  };
+  const env = await createEnv({
+    stored,
+    handler: (url) => (url.endsWith('/api/me') ? sessionUser : { status: 200, body: ACTIVE_PACKET }),
+  });
+  await env.flush();
+
+  const row = plain((await env.send({ type: 'hb:state:get' })).state.entries[0]);
+  assert.equal(row.status, 'awaiting');
+  assert.equal(row.claimMode, 'manual', '唤醒后接着跑，查到人均 2.00 < 3，落成古法');
+  assert.ok(row.lines.map((item) => item.text).includes('动态：人均 2.00 LDC < 阈值 3.00，转古法手动开启'));
+  assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0);
+});
+
 test('领取结果无法确认时提示核对且不自动重试', async () => {
   const env = await createEnv({
     handler: (url) => {

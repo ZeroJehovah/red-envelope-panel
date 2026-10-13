@@ -139,6 +139,17 @@
     return [line(wish, 'success'), line(packetInfoText(data), 'success')];
   }
 
+  // 动态领取的判定量：'total' 取总额，'average' 取人均（总额 ÷ 个数／抽选人数）。
+  // 取不到（红包没有金额或人数）时返回 null，调用方按「不达标、走古法」处理。
+  function packetMetricValue(packet, metric) {
+    const total = Number(packet?.total_amount);
+    if (!Number.isFinite(total)) return null;
+    if (metric !== 'average') return total;
+    const count = Number(packet?.count);
+    if (!Number.isFinite(count) || count <= 0) return null;
+    return total / count;
+  }
+
   function packetStatusText(status) {
     return { active: '可领取', exhausted: '已领完', expired: '已过期', cancelled: '已取消', drawn: '抽选已结束' }[status] || status;
   }
@@ -318,6 +329,13 @@
     return Math.min(Math.round(number), GAP_EXTRA_MAX_MS);
   }
 
+  // 动态领取阈值：非负数，最多两位小数（多填的位四舍五入掉），非法值归 0。
+  function clampThreshold(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return 0;
+    return Math.round(number * 100) / 100;
+  }
+
   globalThis.HBProtocol = {
     HB_SITE_URL,
     GAP_BASE_MS,
@@ -348,11 +366,13 @@
     lotteryPayoutText,
     packetSnapshot,
     matchLines,
+    packetMetricValue,
     packetStatusText,
     queryOutcome,
     claimReceipt,
     watchDeadline,
     packetOutcome,
     clampGapExtra,
+    clampThreshold,
   };
 })();

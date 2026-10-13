@@ -181,6 +181,9 @@ test('面板按脚本版侧边栏的结构复刻控件', () => {
     ['配置面板的齿轮按钮', /id="hb-config-toggle"/],
     ['收起按钮', /id="hb-close"/],
     ['领取方式开关', /data-switch="claimMode"/],
+    ['领取阈值的判定量开关', /data-switch="claimMetric"/],
+    ['领取阈值输入框', /id="hb-threshold"/],
+    ['领取阈值那一行', /id="hb-threshold-row"/],
     ['间隔时间输入', /id="hb-gap"/],
     ['显示方式开关', /data-switch="display"/],
     ['配置面板里的版本号', /id="hb-config-version"/],
@@ -199,9 +202,30 @@ test('面板按脚本版侧边栏的结构复刻控件', () => {
   // 显示方式把脚本版的悬浮/停靠映射到弹出面板与常显侧边栏。
   assert.match(panel, /display === 'sidebar' \? 'dock' : 'float'/);
   assert.match(panel, /display: next === 'dock' \? 'sidebar' : 'panel'/);
+  // 领取方式是三选一（古法／协议／动态），阈值那一行只在选了动态时露出来。
+  assert.match(panel, /data-value="manual" role="radio"[^>]*>古法</);
+  assert.match(panel, /data-value="direct" role="radio"[^>]*>协议</);
+  assert.match(panel, /data-value="dynamic" role="radio"[^>]*>动态</);
+  assert.match(panel, /thresholdRow\.hidden = claimModeOf\(state\) !== 'dynamic'/,
+    '领取阈值那一行没有跟着领取方式收起来');
   // 两个外壳分别声明自己的形态。
   assert.match(readFileSync(join(root, 'popup.js'), 'utf8'), /shell: 'popup'/);
   assert.match(readFileSync(join(root, 'sidepanel.js'), 'utf8'), /shell: 'sidebar'/);
+});
+
+test('动态领取：指标与阈值存进设置，判定落在查到红包之后', () => {
+  const background = readFileSync(join(root, 'background.js'), 'utf8');
+  assert.match(background, /const CLAIM_MODES = \['manual', 'direct', 'dynamic'\]/, '领取方式少了动态这一档');
+  assert.match(background, /claimMetric: 'total',/, '设置里缺判定指标');
+  assert.match(background, /claimThreshold: 0,/, '设置里缺领取阈值');
+  assert.match(background, /claimThreshold: P\.clampThreshold\(merged\.claimThreshold\)/, '阈值没有走夹紧');
+  // 口令查到红包之后才判定：动态落成 manual/direct，之后领取卡片与 hb:claim 才认它。
+  assert.match(background, /entry\.claimMode = pass \? 'direct' : 'manual'/);
+  assert.match(background, /const resolved = resolveClaimMode\(entry, packet\);/);
+  // 桥接层提供判定量与阈值夹紧，两侧（面板输入框与后台）用同一份。
+  const protocol = readFileSync(join(root, 'hb-protocol.js'), 'utf8');
+  assert.match(protocol, /function packetMetricValue\(packet, metric\)/);
+  assert.match(protocol, /function clampThreshold\(value\)/);
 });
 
 test('红包卡片保持原尺寸，详情窗口按卡片开窗', () => {

@@ -2,7 +2,7 @@
  *
  * 结构与脚本版 browser/userscripts/linuxdo-hongbao-code-sidebar.user.js（v2.35.0）的
  * ensurePanel() 一一对应：头部两个开关（单个/批量、文本/数字）与三个图标按钮（打开红包站、
- * 配置、收起）、可折叠的配置面板（领取方式、间隔时间、显示方式、版本号）、正文里的输入框与
+ * 配置、收起）、可折叠的配置面板（领取方式、动态模式的领取阈值、间隔时间、显示方式、版本号）、
  * 批量文本域、「拆红包」与字数提示、暂停横幅里的「恢复执行」，以及「口令历史（N 条 · 排队 M 条）」
  * 加作废队列/清空历史的图标按钮与逐行（时间、数字标记、点击口令填入输入框、红包详情图标、作废/删除）。
  *
@@ -28,6 +28,14 @@
   // 面板与站点无关：入口只有扩展图标与浏览器侧边栏，红包站只作为登录与核对记录的跳转目标。
   const SITE_URL = 'https://hb.unsnow.org/';
   const SITE_LABEL = 'hb.unsnow.org';
+
+  // 领取方式三选一的文案与悬停说明（配置面板那一行与脚本版同一套说法）。
+  const CLAIM_MODE_TEXT = { manual: '古法', direct: '协议', dynamic: '动态' };
+  const CLAIM_MODE_HINT = {
+    manual: '古法：查到可领的红包后弹卡片，由你点「开红包」',
+    direct: '协议：查到可领的红包后台直接领取',
+    dynamic: '动态：按领取阈值决定走协议还是古法',
+  };
 
   // 图标全部内联随包（MV3 CSP 不允许远程资源），path 与脚本版同一组。
   const ICON_PATHS = {
@@ -82,15 +90,25 @@
     <div class="hb-config" id="hb-config" hidden>
       <div class="hb-config-row">
         <span>领取方式：</span>
-        <button type="button" class="hb-switch hb-claim-mode" data-switch="claimMode" data-on="direct" role="switch" aria-label="协议领取" aria-checked="false">
-          <span class="hb-switch-option" data-value="manual">古法</span>
-          <span class="hb-switch-option" data-value="direct">协议</span>
-        </button>
+        <div class="hb-switch hb-claim-mode" data-switch="claimMode" role="radiogroup" aria-label="领取方式">
+          <button type="button" class="hb-switch-option" data-value="manual" role="radio" aria-checked="false">古法</button>
+          <button type="button" class="hb-switch-option" data-value="direct" role="radio" aria-checked="false">协议</button>
+          <button type="button" class="hb-switch-option" data-value="dynamic" role="radio" aria-checked="false">动态</button>
+        </div>
         <span class="hb-config-version" id="hb-config-version"></span>
+      </div>
+      <div class="hb-config-row hb-config-threshold" id="hb-threshold-row" hidden>
+        <span>领取阈值：</span><span>自动协议领取</span>
+        <div class="hb-switch" data-switch="claimMetric" role="radiogroup" aria-label="领取阈值的判定量">
+          <button type="button" class="hb-switch-option" data-value="total" role="radio" aria-checked="false">总额</button>
+          <button type="button" class="hb-switch-option" data-value="average" role="radio" aria-checked="false">人均</button>
+        </div>
+        <span>达到</span>
+        <input id="hb-threshold" class="hb-num" type="number" min="0" step="0.01" inputmode="decimal" aria-label="自动协议领取的金额阈值（LDC，最多两位小数）"><span>的红包</span>
       </div>
       <div class="hb-config-row hb-config-gap-row">
         <span>间隔时间：</span><span>${P.GAP_BASE_MS}+</span>
-        <input id="hb-gap" class="hb-gap" type="number" min="0" max="${P.GAP_EXTRA_MAX_MS}" step="100" aria-label="基础间隔之上的加时（毫秒）"><span>ms</span>
+        <input id="hb-gap" class="hb-num" type="number" min="0" max="${P.GAP_EXTRA_MAX_MS}" step="100" aria-label="基础间隔之上的加时（毫秒）"><span>ms</span>
       </div>
       <div class="hb-config-row">
         <span>显示方式：</span>
@@ -131,7 +149,10 @@
   `;
 
   // 面板只镜像最近一次渲染的 settings 用于输入过滤与开关外观，权威状态始终在后台。
-  let settings = { charset: 'text', batch: false, claimMode: 'manual', gapExtraMs: 0, display: 'panel' };
+  let settings = {
+    charset: 'text', batch: false, claimMode: 'manual', claimMetric: 'total', claimThreshold: 0,
+    gapExtraMs: 0, display: 'panel',
+  };
   const fieldStates = new WeakMap();
   // 最近一次渲染的完整状态，供「打开卡片」按 id 找条目、以及渲染相对时间；
   // 配置面板的展开状态只活在本次会话。
@@ -304,9 +325,14 @@
   function setSwitch(name, value) {
     const container = document.querySelector('[data-switch="' + name + '"]');
     if (!container) return;
-    container.setAttribute('aria-checked', String(container.dataset.on === value));
+    // 两段式开关（批量、字符类型、显示方式）把 data-on 那一段算「打开」；三选一的领取
+    // 方式与阈值那两段是 role="radiogroup"，每一段自己带 aria-checked，选中谁亮谁。
+    const radio = container.getAttribute('role') === 'radiogroup';
+    if (!radio) container.setAttribute('aria-checked', String(container.dataset.on === value));
     for (const option of container.querySelectorAll('.hb-switch-option')) {
-      option.classList.toggle('is-active', option.dataset.value === value);
+      const active = option.dataset.value === value;
+      option.classList.toggle('is-active', active);
+      if (radio) option.setAttribute('aria-checked', String(active));
     }
   }
 
@@ -328,20 +354,25 @@
 
     setSwitch('batch', batch ? 'batch' : 'single');
     setSwitch('charset', charset);
-    setSwitch('claimMode', settings.claimMode === 'direct' ? 'direct' : 'manual');
+    // 领取方式三选一：古法／协议／动态，认不出来的值一律当古法（与后台的夹紧一致）。
+    const claimMode = CLAIM_MODE_TEXT[settings.claimMode] ? settings.claimMode : 'manual';
+    setSwitch('claimMode', claimMode);
+    setSwitch('claimMetric', settings.claimMetric === 'average' ? 'average' : 'total');
     setSwitch('display', displayMode(settings) === 'dock' ? 'dock' : 'float');
 
     const batchSwitch = document.querySelector('[data-switch="batch"]');
     const charsetSwitch = document.querySelector('[data-switch="charset"]');
     const displaySwitch = document.querySelector('[data-switch="display"]');
     const claimSwitch = document.querySelector('[data-switch="claimMode"]');
+    const metricSwitch = document.querySelector('[data-switch="claimMetric"]');
     batchSwitch.title = batch ? '当前批量模式，点击切换单个' : '当前单个模式，点击切换批量';
     charsetSwitch.title = charset === 'numeric' ? '当前数字模式，点击切换文本' : '当前文本模式，点击切换数字';
     displaySwitch.title = displayMode(settings) === 'dock'
       ? '停靠：点图标开合侧边栏，点击改回悬浮弹窗'
       : '悬浮：点图标弹出面板，点击改为侧边栏常显';
-    claimSwitch.title = (settings.claimMode === 'direct' ? '当前协议：直接领取；点击切换古法' : '当前古法：弹窗手动开启；点击切换协议')
-      + '。对之后提交的口令生效';
+    claimSwitch.title = CLAIM_MODE_HINT[claimMode] + '。对之后提交的口令生效';
+    claimSwitch.setAttribute('aria-label', '领取方式：' + CLAIM_MODE_TEXT[claimMode]);
+    metricSwitch.title = '人均 = 总额 ÷ 红包个数（抽奖按抽选人数算）';
 
     syncDraft();
     if (pendingFieldFocus) {
@@ -367,6 +398,22 @@
     const wanted = String(Number(state.settings?.gapExtraMs) || 0);
     // 正在输入时不要被后台回写的值打断。
     if (gap && document.activeElement !== gap && gap.value !== wanted) gap.value = wanted;
+
+    // 领取阈值那一行只在动态模式下出现（选了动态才需要它）。
+    const thresholdRow = document.getElementById('hb-threshold-row');
+    if (thresholdRow) thresholdRow.hidden = claimModeOf(state) !== 'dynamic';
+
+    const threshold = document.getElementById('hb-threshold');
+    const wantedThreshold = String(P.clampThreshold(state.settings?.claimThreshold));
+    if (threshold && document.activeElement !== threshold && threshold.value !== wantedThreshold) {
+      threshold.value = wantedThreshold;
+    }
+  }
+
+  // 配置面板要按「后台那份设置」决定阈值行的显隐；后台还没回话时用面板自己的镜像。
+  function claimModeOf(state) {
+    const raw = state?.settings?.claimMode ?? settings.claimMode;
+    return CLAIM_MODE_TEXT[raw] ? raw : 'manual';
   }
 
   /* -------------------------------- 历史列表 -------------------------------- */
@@ -633,10 +680,17 @@
       patchSettings({ charset: next });
       activeField()?.focus();
     });
-    document.querySelector('[data-switch="claimMode"]').addEventListener('click', () => {
-      const next = settings.claimMode === 'direct' ? 'manual' : 'direct';
+    // 三选一：点哪一段就是哪一段。
+    document.querySelector('[data-switch="claimMode"]').addEventListener('click', (event) => {
+      const option = event.target.closest('.hb-switch-option');
+      if (!option) return;
       // 领取方式存进设置，新的口令按它走；脚本版也只是切换开关，不另写说明。
-      patchSettings({ claimMode: next });
+      patchSettings({ claimMode: option.dataset.value });
+    });
+    document.querySelector('[data-switch="claimMetric"]').addEventListener('click', (event) => {
+      const option = event.target.closest('.hb-switch-option');
+      if (!option) return;
+      patchSettings({ claimMetric: option.dataset.value });
     });
     document.querySelector('[data-switch="display"]').addEventListener('click', () => {
       const next = displayMode(settings) === 'dock' ? 'float' : 'dock';
@@ -664,6 +718,17 @@
     gapInput.addEventListener('change', () => {
       patchSettings({ gapExtraMs: P.clampGapExtra(gapInput.value) });
       gapInput.value = String(P.clampGapExtra(gapInput.value));
+    });
+
+    const thresholdInput = document.getElementById('hb-threshold');
+    // 阈值的写法与间隔时间同一套路子：输入即时生效，失焦再按两位小数写回控件。
+    thresholdInput.addEventListener('input', () => {
+      patchSettings({ claimThreshold: P.clampThreshold(thresholdInput.value) });
+    });
+    thresholdInput.addEventListener('change', () => {
+      const value = P.clampThreshold(thresholdInput.value);
+      patchSettings({ claimThreshold: value });
+      thresholdInput.value = String(value);
     });
 
     document.getElementById('hb-session').addEventListener('click', async () => {

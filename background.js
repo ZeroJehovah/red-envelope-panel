@@ -29,13 +29,24 @@ const WAIT_SLICE_MS = 30000;         // 单次等待上限，到点重新计算
 const REMOVED_MAX_AGE_MS = 30 * 24 * 3600 * 1000;
 const REMOVED_MAX_ENTRIES = 1000;
 
+const CLAIM_MODES = ['manual', 'direct', 'dynamic'];
+const CLAIM_METRIC_TEXT = { total: '总额', average: '人均' };
+
 const DEFAULT_SETTINGS = Object.freeze({
   charset: 'text',       // 'text'：6-18 字符文本口令；'numeric'：8 位数字口令
   batch: false,          // false：单个口令；true：批量口令（每行一条）
-  claimMode: 'manual',   // 'manual'：古法，面板内点击开启；'direct'：协议，后台直接领取
+  // 'manual'：古法，面板内点击开启；'direct'：协议，后台直接领取；
+  // 'dynamic'：动态，口令查到红包之后按下面的指标与阈值决定走协议还是古法。
+  claimMode: 'manual',
+  claimMetric: 'total',  // 'total'：按总额判定；'average'：按人均（总额 ÷ 个数／抽选人数）判定
+  claimThreshold: 0,     // 动态模式的门槛：判定量 ≥ 它就走协议；默认 0 等于都走协议
   gapExtraMs: 0,         // 在 5 秒基础间隔之上追加的等待时间
   display: 'panel',      // 'panel'：点图标弹出面板；'sidebar'：常显侧边栏
 });
+
+function normalizeClaimMode(value) {
+  return CLAIM_MODES.includes(value) ? value : 'manual';
+}
 
 function emptyState() {
   return {
@@ -90,7 +101,8 @@ function normalizeEntry(raw) {
     id: typeof raw.id === 'string' && raw.id ? raw.id : createId(),
     code: raw.code,
     // 领取方式在提交时固定（脚本版同语义）：只认存下来的值，不按状态改写。
-    claimMode: raw.claimMode === 'direct' ? 'direct' : 'manual',
+    // 存的是 'dynamic' 时也原样留着，查到红包后由 resolveClaimMode 落成 manual/direct。
+    claimMode: normalizeClaimMode(raw.claimMode),
     packetId: typeof raw.packetId === 'string' && raw.packetId ? raw.packetId : null,
     matched: P.hasMatchedPacket(raw),
     charset: raw.charset === 'numeric' ? 'numeric' : 'text',
@@ -119,7 +131,7 @@ function preserveEntry(raw) {
   return {
     id: typeof raw.id === 'string' && raw.id ? raw.id : createId(),
     code: raw.code,
-    claimMode: raw.claimMode === 'direct' ? 'direct' : 'manual',
+    claimMode: normalizeClaimMode(raw.claimMode),
     packetId: typeof raw.packetId === 'string' && raw.packetId ? raw.packetId : null,
     matched: P.hasMatchedPacket(raw),
     charset: raw.charset === 'numeric' ? 'numeric' : 'text',
@@ -150,7 +162,9 @@ function normalizeSettings(raw) {
   return {
     charset: merged.charset === 'numeric' ? 'numeric' : 'text',
     batch: merged.batch === true,
-    claimMode: merged.claimMode === 'direct' ? 'direct' : 'manual',
+    claimMode: normalizeClaimMode(merged.claimMode),
+    claimMetric: merged.claimMetric === 'average' ? 'average' : 'total',
+    claimThreshold: P.clampThreshold(merged.claimThreshold),
     gapExtraMs: P.clampGapExtra(merged.gapExtraMs),
     display: merged.display === 'sidebar' ? 'sidebar' : 'panel',
   };
@@ -386,10 +400,35 @@ function rememberPacket(packet) {
 
 /* --------------------------------- 领取 -------------------------------- */
 
+// 动态模式的判定：口令查到红包之后才谈得上比大小（总额／人均都来自站点回包）。达标走
+// 协议，不达标转古法；判定量取不到（红包没有金额或人数）也按古法——宁可让用户自己点
+// 一下，也不要自动发出写请求。判定结果落回 entry.claimMode（'dynamic' 对这条记录到此
+// 为止），因此领取卡片与 handleClaim 的校验仍旧只认 manual/direct。
+//
+// 指标与阈值读的是「领取这一刻」的设置，不是提交那一刻的快照：队列里还没轮到的口令跟着
+// 最新设置走，用户调完阈值不必重新提交。
+function resolveClaimMode(entry, packet) {
+  if (entry.claimMode !== 'dynamic') {
+    return { mode: entry.claimMode === 'direct' ? 'direct' : 'manual', note: [] };
+  }
+  const metric = state.settings.claimMetric === 'average' ? 'average' : 'total';
+  const threshold = P.clampThreshold(state.settings.claimThreshold);
+  const value = P.packetMetricValue(packet, metric);
+  const pass = Number.isFinite(value) && value >= threshold;
+  entry.claimMode = pass ? 'direct' : 'manual';
+  const note = P.line('动态：' + CLAIM_METRIC_TEXT[metric] + ' '
+    + (Number.isFinite(value) ? value.toFixed(2) + ' LDC' : '未知')
+    + (pass ? ' ≥ ' : ' < ') + '阈值 ' + threshold.toFixed(2)
+    + (pass ? '，自动协议领取' : '，转古法手动开启'), 'muted');
+  return { mode: entry.claimMode, note: [note] };
+}
+
 // 正在领取的条目：一次点击只放行一条请求，重复点击在这里被挡掉。
 const claiming = new Set();
 
-async function claimPacket(entry, packet) {
+// extraLines：动态模式在领取前写的判定说明，接在匹配行之后、领取进度行之前，
+// 领取结果里也留着——事后能看清这一次为什么走了协议。
+async function claimPacket(entry, packet, extraLines = []) {
   const match = P.matchLines(packet);
   if (claiming.has(entry.id)) {
     return { lines: match.concat(P.line('领取失败: 该口令正在处理中，未发送领取请求', 'error')) };
@@ -402,7 +441,7 @@ async function claimPacket(entry, packet) {
     // 队列那条操作已经等过，这里直接过。等待期间条目已在 claiming 里，重复点击被上面
     // 的检查挡下，一次点击依旧只放行一次请求。
     entry.status = 'running';
-    entry.lines = match.concat(P.line(gapRemainingMs() > 0 ? '正在等待领取间隔…' : '正在开启红包…', 'muted'));
+    entry.lines = match.concat(extraLines, P.line(gapRemainingMs() > 0 ? '正在等待领取间隔…' : '正在开启红包…', 'muted'));
     entry.result = P.linesText(entry.lines);
     await commit();
     await waitForGap();
@@ -413,7 +452,7 @@ async function claimPacket(entry, packet) {
     if (P.validPacket(receipt.packet)) rememberPacket(receipt.packet);
     // 抽奖报名成功不是终局：条目停在 awaiting，由开奖看护轮询到开奖。
     if (receipt.joined) entry.packet = P.packetSnapshot(receipt.packet || { ...packet, joined: true });
-    return { ...receipt, awaiting: receipt.joined === true, lines: match.concat(receipt.lines) };
+    return { ...receipt, awaiting: receipt.joined === true, lines: match.concat(extraLines, receipt.lines) };
   } catch (error) {
     const reason = error instanceof Error ? error.message : '请求失败';
     return {
@@ -464,9 +503,11 @@ async function runEntry(entry) {
   // 不可领取的红包只更新历史，详情由面板按需展开。
   if (decision) return decision;
 
-  // 领取方式在提交时固定：改设置不会自动开启已经查到的红包。
-  if (entry.claimMode !== 'direct') {
-    const lines = P.matchLines(packet).concat(P.line(P.AWAIT_MANUAL_LINE, 'muted'));
+  // 领取方式在提交时固定：改设置不会自动开启已经查到的红包。动态模式要等红包查回来才
+  // 谈得上判定（总额／人均都来自站点回包），判定就落在这一处。
+  const resolved = resolveClaimMode(entry, packet);
+  if (resolved.mode !== 'direct') {
+    const lines = P.matchLines(packet).concat(resolved.note, P.line(P.AWAIT_MANUAL_LINE, 'muted'));
     entry.status = 'awaiting';
     entry.lines = lines;
     entry.result = P.linesText(lines);
@@ -474,7 +515,7 @@ async function runEntry(entry) {
     popClaimCard(entry);
     return { awaiting: true, lines };
   }
-  return claimPacket(entry, packet);
+  return claimPacket(entry, packet, resolved.note);
 }
 
 // 抽奖红包：/grab 只是报名，钱等服务器在 draw_at 开奖。报名成功后看护的收摊时刻落库
@@ -504,8 +545,11 @@ async function runLotteryEntry(entry, packet, user) {
       lines: match.concat(P.line('未参与: 未确认红包站登录状态，请到红包站登录后再试', 'muted')),
     };
   }
-  if (entry.claimMode !== 'direct') {
-    const lines = match.concat(P.line(P.LOTTERY_AWAIT_LINE, 'muted'));
+  // 抽奖的「领」就是报名，动态模式的判定与普通红包同一条路子：达标直接报名，否则弹卡片
+  // 等用户点「参与抽选」。
+  const resolved = resolveClaimMode(entry, packet);
+  if (resolved.mode !== 'direct') {
+    const lines = match.concat(resolved.note, P.line(P.LOTTERY_AWAIT_LINE, 'muted'));
     entry.status = 'awaiting';
     entry.lines = lines;
     entry.result = P.linesText(lines);
@@ -513,7 +557,7 @@ async function runLotteryEntry(entry, packet, user) {
     popClaimCard(entry);
     return { awaiting: true, lines };
   }
-  return claimPacket(entry, packet);
+  return claimPacket(entry, packet, resolved.note);
 }
 
 /* --------------------------------- 队列 -------------------------------- */
@@ -806,7 +850,7 @@ async function readPacket(id, options = {}) {
 }
 
 async function handleSubmit(message) {
-  const claimMode = message?.claimMode === 'direct' ? 'direct' : 'manual';
+  const claimMode = normalizeClaimMode(message?.claimMode);
   const incoming = Array.isArray(message?.codes) ? message.codes : [];
   const created = [];
   for (const item of incoming) {

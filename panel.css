@@ -132,6 +132,16 @@ main {
   line-height: 1.6;
 }
 
+/* 三选一的领取方式与阈值那两段是个真按钮（各自可点、带 role="radio"），先抹掉浏览器
+ * 给按钮的底与边；选中态的蓝色底来自下面的 .is-active，权重比这里高。 */
+button.hb-switch-option {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
 /* 选中的那一段压成站点蓝底白字（脚本版就是 --tertiary / --secondary），不靠加粗提示。 */
 .hb-switch-option.is-active {
   background: var(--hb-accent);
@@ -193,6 +203,10 @@ main {
   align-items: baseline;
 }
 
+.hb-config-threshold {
+  align-items: baseline;
+}
+
 .hb-config-version {
   margin-left: auto;
   font-size: 11px;
@@ -203,7 +217,8 @@ main {
   color: var(--hb-text);
 }
 
-.hb-gap {
+/* 配置面板里的数字框：间隔加时与动态领取阈值共用。 */
+.hb-num {
   width: 5.5em;
   margin: 0;
   padding: 2px 6px;
@@ -214,7 +229,7 @@ main {
   font: inherit;
 }
 
-.hb-gap:focus {
+.hb-num:focus {
   border-color: var(--hb-accent);
   outline: none;
 }

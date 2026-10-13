@@ -39,7 +39,10 @@
       const state = {
         entries: [],
         removed: [],
-        settings: { charset: 'text', batch: false, claimMode: 'manual', gapExtraMs: 0, display: 'panel' },
+        settings: {
+          charset: 'text', batch: false, claimMode: 'manual', claimMetric: 'total', claimThreshold: 0,
+          gapExtraMs: 0, display: 'panel',
+        },
         paused: false,
         pausedReason: '',
       };
@@ -191,6 +194,10 @@
         const sessionText = () => document.getElementById('hb-session-text');
         const config = () => document.getElementById('hb-config');
         const gap = () => document.getElementById('hb-gap');
+        const claimOption = (value) => document.querySelector('[data-switch="claimMode"] [data-value="' + value + '"]');
+        const metricOption = (value) => document.querySelector('[data-switch="claimMetric"] [data-value="' + value + '"]');
+        const thresholdRow = () => document.getElementById('hb-threshold-row');
+        const threshold = () => document.getElementById('hb-threshold');
         const row = (id) => document.querySelector('#hb-list .hb-entry[data-id="' + id + '"]');
         const rows = () => document.querySelectorAll('#hb-list .hb-entry');
         const click = (node) => node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -277,11 +284,46 @@
             document.getElementById('hb-config-version').textContent === 'vharness',
             document.getElementById('hb-config-version').textContent);
           check('领取方式默认古法',
-            document.querySelector('[data-switch="claimMode"]').getAttribute('aria-checked') === 'false');
-          click(document.querySelector('[data-switch="claimMode"]'));
+            claimOption('manual').getAttribute('aria-checked') === 'true'
+            && claimOption('direct').getAttribute('aria-checked') === 'false'
+            && claimOption('dynamic').getAttribute('aria-checked') === 'false');
+          // 动态模式才用得上的领取阈值行：选了动态才露出来。
+          check('领取阈值行默认收起', thresholdRow().hidden === true);
+          click(claimOption('direct'));
           await tick();
-          check('领取方式可切到协议', document.querySelector('[data-switch="claimMode"]').getAttribute('aria-checked') === 'true'
+          check('领取方式可切到协议', claimOption('direct').getAttribute('aria-checked') === 'true'
             && sent.some((message) => message.type === 'hb:state:patch' && message.patch.settings.claimMode === 'direct'));
+          check('协议模式不展开领取阈值行', thresholdRow().hidden === true);
+          click(claimOption('dynamic'));
+          await tick();
+          check('领取方式可切到动态', claimOption('dynamic').getAttribute('aria-checked') === 'true'
+            && sent.some((message) => message.type === 'hb:state:patch' && message.patch.settings.claimMode === 'dynamic'));
+          check('动态模式展开领取阈值行', thresholdRow().hidden === false);
+          check('领取阈值默认为 0', threshold().value === '0', threshold().value);
+          check('领取阈值的判定量默认总额', metricOption('total').getAttribute('aria-checked') === 'true'
+            && metricOption('average').getAttribute('aria-checked') === 'false');
+          click(metricOption('average'));
+          await tick();
+          check('领取阈值的判定量可切到人均', metricOption('average').getAttribute('aria-checked') === 'true'
+            && sent.some((message) => message.type === 'hb:state:patch' && message.patch.settings.claimMetric === 'average'));
+          type(threshold(), '3.456');
+          await tick();
+          check('领取阈值最多两位小数',
+            sent.some((message) => message.type === 'hb:state:patch' && message.patch.settings.claimThreshold === 3.46),
+            JSON.stringify(sent.filter((item) => item.type === 'hb:state:patch').map((item) => item.patch.settings)));
+          type(threshold(), '-1');
+          await tick();
+          check('领取阈值不接受负数',
+            sent.some((message) => message.type === 'hb:state:patch' && message.patch.settings.claimThreshold === 0));
+          type(threshold(), '2.5');
+          await tick();
+          threshold().dispatchEvent(new Event('change', { bubbles: true }));
+          await tick();
+          check('领取阈值失焦写回控件', threshold().value === '2.5', threshold().value);
+          click(claimOption('manual'));
+          await tick();
+          check('切回古法收起领取阈值行', thresholdRow().hidden === true
+            && claimOption('manual').getAttribute('aria-checked') === 'true');
           check('间隔时间显示基础 5000+',
             /5000\+/.test(config().textContent), config().textContent.slice(0, 40));
           check('间隔时间输入框回填当前加时', gap().value === '0', gap().value);
