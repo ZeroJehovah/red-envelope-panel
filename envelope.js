@@ -10,14 +10,14 @@
  *     也不在面板页面里——弹出面板受浏览器弹窗高度上限（600px）限制，卡片按原尺寸放不下，
  *     从 v0.9.7 起由面板另开一个独立小窗口来放卡片；
  *   - 一次只展示一张卡片，没有脚本版的多卡堆叠与「全部关闭」；
- *   - 关闭卡片不会把条目改写成「未领取」：面板里条目留在「待开启」，可以再次打开；
+ *   - 关闭**领取卡片**（后台自动弹出的那张）＝ 这一次没有领：窗口在 pagehide 时告诉后台，
+ *     历史里那一行与脚本版 closeEnvelopeCard 一致地写成「未领取: 已关闭红包」（抽奖是
+ *     「未参与: 已关闭抽选红包」，v0.15.0）；detail 卡片关掉不改任何条目状态；
  *   - 开启卡片（领取卡片）顶部贴一条红包基础信息——普通红包的额度与份数，形如
  *     「100.00 LDC | 15 个」（`#env-packet-info`，v0.14.0）：只读的详情卡片与抽奖卡片不铺
  *     这条（脚本版同步，见 scripts 仓库 `browser/userscripts/LINUXDO.md`）；
- *   - 详情卡片（历史行开出）在条目还等着点一下（古法）时也挂着「开红包」：这件事跟着**条目
- *     状态**走而不是跟着窗口走（v0.13.0），于是关掉自动弹出的那张卡片之后仍能领，不必重新输
- *     一遍口令。脚本版没有这个状态——它关掉卡片就把行记成「未领取: 已关闭红包」，历史卡片**
- *     永远只读**（openHistoryPacket 从不挂开启入口）；
+ *   - 详情卡片（历史行开出）一律只读、不挂任何领取入口（v0.15.0 撤回 v0.13.0 给它挂的那颗
+ *     「开红包」）——脚本版 openHistoryPacket 交出来的历史卡片同样从不挂开启入口；
  *   - 头像用原站返回的地址加载（和原站 claimAvatarSrc 一致），取不到或不合法时
  *     回落到原站那套确定性 SVG；协议请求仍然只发往 hb.unsnow.org。
  *
@@ -274,12 +274,6 @@
       open.disabled = busy;
       open.classList.toggle('spinning', busy);
     }
-    // 详情卡片里那颗按钮是横条，不做翻转动画，直接把字换成进行中。
-    const inline = state.node.querySelector('#btn-open-packet-detail');
-    if (inline) {
-      inline.disabled = busy;
-      inline.textContent = busy ? '正在开启…' : '开红包';
-    }
     const join = state.node.querySelector('#lottery-join');
     if (join && !join.hidden) {
       join.disabled = busy;
@@ -407,31 +401,6 @@
     const claims = node.querySelector('#env-claims-list');
     if (claims) claims.hidden = !packet;
     if (packet) renderClaims(node, packet);
-    // 详情卡片（历史行开出）里那条领取入口：条目还等着点一下时它才在。
-    syncDetailAction(state);
-  }
-
-  // 详情卡片里的「开红包」：条目还等着点一下（古法）时，历史行开出来的这张卡片照样能领——
-  // 关掉后台自动弹出的那张领取卡片之后，这里是唯一能领的地方（脚本版没这个状态：它关掉卡片
-  // 就把行记成「未领取: 已关闭红包」，想领只能重新输一遍口令）。已经有结论（领取成功）或这张
-  // 卡片本来就只读时不出现；领取失败仍留着，用户可以再点一次（授权与在途标记都在后台把关）。
-  function syncDetailAction(state) {
-    if (!state.detail || state.viewOnly) return null;
-    const view = state.node.querySelector('#envelope-opened-view');
-    if (!view) return null;
-    let button = view.querySelector('#btn-open-packet-detail');
-    if (!button) {
-      button = document.createElement('button');
-      button.type = 'button';
-      button.id = 'btn-open-packet-detail';
-      button.className = 'envelope-detail-open';
-      button.textContent = '开红包';
-      const tail = view.querySelector('.envelope-close-btn');
-      view.insertBefore(button, tail || null);
-      button.addEventListener('click', (event) => { runWrite(state, event); });
-    }
-    button.hidden = Boolean(state.outcome);
-    return button;
   }
 
   // 历史条目（只读）：结论直接由红包快照推出来，没有领取请求也没有授权入口。
@@ -689,8 +658,8 @@
       packet,
       user: options.user || null,
       viewOnly: options.viewOnly === true,
-      // 详情卡片：铺结论视图（进度与领取记录），不以封口视图示人；条目还等着点一下时
-      // syncDetailAction 会给它补上「开红包」（v0.13.0）。
+      // 详情卡片：铺结论视图（进度与领取记录），不以封口视图示人，也不挂任何领取入口
+      // （v0.15.0：历史行开出来的一律只读，能写的只有后台自动弹出的那张领取卡片）。
       detail: options.detail === true,
       // 顶部那条基础信息只属于**开启卡片**（`view=claim` 的领取卡片）：普通红包铺，
       // 只读的详情卡片与抽奖卡片都不铺（v0.14.0）。

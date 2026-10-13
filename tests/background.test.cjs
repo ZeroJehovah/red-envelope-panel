@@ -488,6 +488,45 @@ test('古法：历史点击开只读详情卡片，与自动弹出的领取卡�
   assert.equal(env.cardWindows.length, before, '领取落定后点历史行不多开窗口');
 });
 
+test('关掉领取卡片＝这一次没有领：条目写成未领取，之后不再接受领取', async () => {
+  const handler = (url) => {
+    if (url.endsWith('/api/me')) return sessionUser;
+    if (url.endsWith('/grab')) return { status: 200, body: { amount: 1.23 } };
+    return { status: 200, body: ACTIVE_PACKET };
+  };
+  const env = await createEnv({ handler });
+  const submit = await env.send({ type: 'hb:submit', codes: [{ code: HAPPY_CODE, charset: 'text' }], claimMode: 'manual' });
+  await env.flush();
+  const entry = submit.state.entries[0];
+  assert.equal(entry.status, 'awaiting');
+
+  // 卡片窗口在 pagehide 时报这一条（渲染进程被直接杀掉时由 windows.onRemoved 兜底，同一道判据）。
+  const closed = await env.send({ type: 'hb:card-closed', id: entry.id });
+  assert.equal(closed.ok, true);
+  const settled = closed.state.entries[0];
+  assert.equal(settled.status, 'done', '关掉领取卡片后条目不再等领取');
+  assert.equal(settled.result, '未领取: 已关闭红包');
+  assert.equal(settled.packetId, 'p1', '关掉卡片不动红包快照，历史行照旧能看详情');
+
+  // 落定之后再点一次也发不出去：状态已经不是 awaiting。
+  const refused = await env.send({ type: 'hb:claim', id: entry.id, trusted: true });
+  assert.equal(refused.ok, false);
+  assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0, '关掉卡片后不该再发领取请求');
+
+  // 页面与兜底各报一次（重复到达）也不改写：已经不是 awaiting，原样返回。
+  const repeat = await env.send({ type: 'hb:card-closed', id: entry.id });
+  assert.equal(repeat.state.entries[0].result, '未领取: 已关闭红包');
+
+  // 已经领到的条目不会被这条消息改写（晚到、重到都不行）。
+  const env2 = await createEnv({ handler });
+  const submit2 = await env2.send({ type: 'hb:submit', codes: [{ code: HAPPY_CODE, charset: 'text' }], claimMode: 'manual' });
+  await env2.flush();
+  const id2 = submit2.state.entries[0].id;
+  assert.equal((await env2.send({ type: 'hb:claim', id: id2, trusted: true })).ok, true);
+  await env2.send({ type: 'hb:card-closed', id: id2 });
+  assert.equal((await env2.stored()).entries[0].result, '领取成功: +1.23 LDC', '已经领到的条目不被「关闭」改写');
+});
+
 test('协议：匹配后由后台直接领取', async () => {
   const env = await createEnv({
     handler: (url) => {

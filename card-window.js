@@ -11,13 +11,13 @@
  *     runEntry 里的 showClaimEnvelope / showLotteryEnvelope 的对应物），窗口里是封口视图；
  *   - `detail`：详情卡片——点历史行的红包按钮开出（脚本版 openHistoryPacket 的对应物）。
  * v0.13.0 起历史行一律开详情卡片，不再按条目状态挑窗口种类（那个按钮的名字就是「查看红包
- * 详情」）；卡片能不能写跟着**条目状态**走——`claimable(entry)` 为真时那张详情卡自己留着领取
- * 入口，领取卡片因此只由后台在「刚查到可领」时自动弹出创建。同一种卡片同一个红包就把它拉到
- * 前面，换了红包就把这一种的旧窗口收掉、按新卡片的尺寸重开一个（不走 `tabs.update` 去改已有
- * 窗口的地址：扩展页能不能被这样导航要看浏览器对扩展源给不给权限，关掉重开是同一件事，也不会
- * 留下「窗口开着、里面还是上一个红包」的将就状态）。领取卡片一旦落定（条目不再是 awaiting），
- * 窗口里画的就只剩结论，与详情卡片是同一件事了——那时点历史行直接把那个窗口拉到前面，不再
- * 多开一个。
+ * 详情」）；v0.15.0 起领取入口只长在**领取卡片**上——`claimable(entry)`（条目还等着点一下、
+ * 古法）为真时那张卡片才可写，详情卡片一律只读，关闭领取卡片则由窗口把「这一次没有领」告诉
+ * 后台。同一种卡片同一个红包就把它拉到前面，换了红包就把这一种的旧窗口收掉、按新卡片的尺寸
+ * 重开一个（不走 `tabs.update` 去改已有窗口的地址：扩展页能不能被这样导航要看浏览器对扩展源
+ * 给不给权限，关掉重开是同一件事，也不会留下「窗口开着、里面还是上一个红包」的将就状态）。
+ * 领取卡片一旦落定（条目不再是 awaiting），窗口里画的就只剩结论，与详情卡片是同一件事了——
+ * 那时点历史行直接把那个窗口拉到前面，不再多开一个。
  */
 'use strict';
 
@@ -53,9 +53,10 @@
     return { width: size.width + FRAME_ESTIMATE_X, height: size.height + FRAME_ESTIMATE_Y };
   }
 
-  // 条目的红包还等着点一下（古法）：这样的条目在哪儿打开都留着领取入口——后台自动弹出的领取
-  // 卡片靠它决定挂不挂写入（v0.11.0），面板开出的详情卡也靠它（v0.13.0 起同样挂着「开红包」，
-  // 关掉弹出的那张之后仍能领）。已经报过名的抽奖没有可点的动作（等开奖是后台看护的事）。
+  // 条目的红包还等着点一下（古法）：后台自动弹出的那张**领取卡片**靠它决定挂不挂写入，面板与
+  // 后台也用它判断「领取卡片落定后这一格就是只读卡片」。v0.15.0 起只有领取卡片可写——历史行
+  // 开出来的详情卡片一律只读（脚本版 openHistoryPacket 交出来的历史卡片同样不挂开启入口）。
+  // 已经报过名的抽奖没有可点的动作（等开奖是后台看护的事）。
   function claimable(entry) {
     return Boolean(entry) && entry.status === 'awaiting' && entry.claimMode === 'manual'
       && entry.packet?.joined !== true;
@@ -118,6 +119,13 @@
     }
   }
 
+  // 会话记录里 claim（领取卡片）那一格：后台的 windows.onRemoved 兜底靠它认「刚被关掉的是哪一张
+  // 领取卡片」（卡片页面来不及上报时，见 card.js 的 pagehide 与 background.js 的兜底）。
+  async function claimRecord() {
+    const records = await readRecords();
+    return records[VIEW_CLAIM] || null;
+  }
+
   // 开（或复用）详情窗口。entry 是调用方手里那条历史记录，packet 是它的红包快照。
   // 返回 { ok, action: 'focused' | 'created' | 'replaced', windowId } 或 { ok: false, error }。
   async function open(options = {}) {
@@ -163,6 +171,7 @@
     open,
     remember,
     forget,
+    claimRecord,
     claimable,
     windowSize,
     windowOuterSize,

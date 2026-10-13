@@ -7,6 +7,9 @@
  *   - 领取必须是真实点击授权后的一次性请求，发出后不自动重试；
  *   - 古法查到可领的红包后自动弹出领取卡片（脚本版 showClaimEnvelope / showLotteryEnvelope
  *     的对应物），领取仍然只认卡片上的真实点击；
+ *   - 关掉那张领取卡片（窗口没了）＝ 这一次没有领：与脚本版 closeEnvelopeCard 一致，把那一行
+ *     写成「未领取: 已关闭红包」（抽奖是「未参与: 已关闭抽选红包」）——卡片页面在 pagehide 时
+ *     报一条 hb:card-closed，来不及报（渲染进程被杀）时由 windows.onRemoved 兜底；
  *   - 抽奖报名后停在 awaiting，由开奖看护按 id 只读轮询到开奖；
  *   - 删除按 ID 墓碑，写入按 ID 合并，绝不整体覆盖历史。
  *
@@ -832,6 +835,33 @@ async function handleClaim(message) {
   return { ok: true, state: snapshot(), outcome, packet: livePackets.get(key) || null };
 }
 
+// 领取卡片（后台自动弹出的那张 view=claim）被关掉 ＝ 这一次没有领：与脚本版 closeEnvelopeCard
+// 同一个写法，把这一行写成「未领取: 已关闭红包」（抽奖是「未参与: 已关闭抽选红包」）。
+// 已经领到（不再是 awaiting）、正在领取（claiming 里挡着）、已经报过名的抽选都不动——那些是
+// 别的状态，不该被这条消息改写；所以这条消息晚到、重到、在换卡片时被顺手带出来都不会写错。
+// 领取卡片那一格只放一张：新查询查到另一个可领红包时会顶掉旧窗口（card-window.js 的 open），
+// 那张旧卡片随之消失、也会走到这里记成「未领取」——它是被换掉的、不是用户关的，但对用户是
+// 同一件事：那张卡片不在了，想领要重新输一遍口令（不然那条记录会一直显示「待手动开启」却
+// 没有卡片可点，历史行开出来的一律是只读详情卡片）。
+async function handleCardClosed(message) {
+  const id = typeof message?.id === 'string' ? message.id : '';
+  const entry = state.entries.find((candidate) => candidate.id === id);
+  if (!entry || entry.status !== 'awaiting' || claiming.has(id) || !entry.packet?.id) {
+    return { ok: true, state: snapshot() };
+  }
+  if (entry.packet.joined === true) return { ok: true, state: snapshot() };
+  const closed = P.isLottery(entry.packet) ? '未参与: 已关闭抽选红包' : '未领取: 已关闭红包';
+  entry.status = 'done';
+  entry.lines = P.matchLines(entry.packet).concat(P.line(closed, 'muted'));
+  entry.result = P.linesText(entry.lines);
+  entry.finishedAt = Date.now();
+  entry.scheduledAt = null;
+  entry.watchUntil = null;
+  entry.watchNextAt = null;
+  await commit();
+  return { ok: true, state: snapshot() };
+}
+
 // 红包详情：详情窗口打开卡片时按 id 读红包本身。内存里有（刚查询过、刚拿到领取回执、看护刚
 // 轮询过）就直接用，省掉一次请求；没有或要求 refresh 时才补一次网络查询（按 id 只读，不进
 // 限速）。cacheOnly 只问内存、绝不发请求：详情窗口靠它决定「直接铺卡片」还是「先挂一层
@@ -925,6 +955,8 @@ async function syncActionMode() {
 // hb:submit       → { ok, added, state }（载荷 { codes: [{ code, charset }], claimMode }）
 // hb:claim        → { ok, state }（载荷 { id, trusted: true }，真实点击授权后的一次性领取）
 //                   成功时附带 { outcome, packet }：面板详情卡片据此渲染领取金额与记录
+// hb:card-closed  → { ok, state }（载荷 { id }：领取卡片窗口被关掉＝这一次没有领，
+//                   条目写成「未领取: 已关闭红包」；不该动的那几种状态原样返回）
 // hb:packet       → { ok, packet }（载荷 { id, refresh, cache }，只读红包本身：cache 只问内存，
 //                   refresh 再发一次只读 GET；按 id 只读不进限速，详情窗口靠它省掉能省的请求）
 // hb:void / hb:delete / hb:clear / hb:void-all / hb:resume → { ok, state }
@@ -950,6 +982,8 @@ async function handleMessage(message) {
       return handleSubmit(message);
     case 'hb:claim':
       return handleClaim(message);
+    case 'hb:card-closed':
+      return handleCardClosed(message);
     case 'hb:packet':
       return readPacket(message.id, {
         refresh: message.refresh === true,
@@ -1004,8 +1038,24 @@ api.alarms?.onAlarm.addListener((alarm) => {
   if (alarm?.name === TICK_ALARM) scheduleTick();
 });
 
+// 领取卡片消失的兜底：卡片页面自己会在 pagehide 里发 hb:card-closed，但窗口在页面来得及上报
+// 之前就没了（渲染进程被直接杀掉）时那条消息发不出来，这里按会话记录认「刚被关掉的是哪一张
+// 领取卡片」。两条路都落在 handleCardClosed 的同一道状态判据上，重复到达也不会写错。
+function watchClaimWindowClose() {
+  const cardWindow = globalThis.HBCardWindow;
+  if (!api.windows?.onRemoved?.addListener || typeof cardWindow?.claimRecord !== 'function') return;
+  api.windows.onRemoved.addListener((windowId) => {
+    Promise.resolve(cardWindow.claimRecord()).then((record) => {
+      if (!record || record.windowId !== windowId || !record.entryId) return;
+      return handleCardClosed({ id: record.entryId });
+    }).catch(() => {});
+  });
+}
+
 // worker 每次被唤醒都可能是在队列中途：先载入状态，把该跑的接着跑。
 scheduleTick();
 // 图标点击的去向也随 worker 唤醒重放一次（设置变了、或浏览器把偏好忘了都会在这里补上）。
 syncActionMode().catch(() => {});
+// 关掉的领取卡片那条兜底也随唤醒重放（监听器不跨 worker 生命周期）。
+watchClaimWindowClose();
 

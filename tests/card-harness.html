@@ -7,15 +7,15 @@
      HARNESS-FAIL。
 
      URL 上的 view 决定卡片种类（card.js）：view=claim 是等着点一下的领取卡片，缺省或
-     view=detail 是点历史行开出的详情卡片。能否领取跟着**条目状态**走（v0.13.0），待开启
-     的条目即便开的是详情卡片也留着「开红包」。
+     view=detail 是点历史行开出的详情卡片。领取入口只长在**领取卡片**上（v0.15.0）：历史行
+     开出来的详情卡片一律只读，关掉领取卡片则由窗口把「这一次没有领」报给后台。
 
        card-harness.html?id=hp1&view=claim   待开启的普通红包（领取卡片，可领）
        card-harness.html?id=hp2&view=claim   抽奖红包（领取卡片，未报名）
        card-harness.html?id=hp3              已领取完的历史红包（详情卡片）
        card-harness.html?id=hp4              已领完且自己没领到（金额显示 0.00，详情卡片）
        card-harness.html?id=hp5              后台内存里没有、要等一次只读查询（先看 loading，详情卡片）
-       card-harness.html?id=hp6              待开启的普通红包点历史行开出的详情卡片（自己也留着「开红包」）
+       card-harness.html?id=hp6              待开启的普通红包点历史行开出的详情卡片（只读，不挂领取入口）
        card-harness.html?id=missing          条目不在时的兜底说明
 
      普通红包的**开启卡片**（hp1）顶部还贴一条红包基础信息（「100.00 LDC | 5 个」）；
@@ -129,7 +129,7 @@
             packetId: 'hp5', matched: true, createdAt: 5,
           },
           {
-            // 待开启，这次是按「点历史行」的方式打开的：给的是详情卡片（能不能领跟着条目状态走）。
+            // 待开启，这次是按「点历史行」的方式打开的：给的是只读的详情卡片（不挂领取入口）。
             id: 'hp6', code: '11775521', charset: 'numeric', claimMode: 'manual', status: 'awaiting',
             result: '等待手动开启', lines: [{ text: '等待手动开启', tone: 'muted' }],
             packet: { id: 'hp6', type: 'random', status: 'active', code: '11775521', creator: { username: 'alice', linuxdo_id: 1 } },
@@ -156,6 +156,8 @@
               return { ok: true, packet: packetDetails[message.id] || null };
             }
             if (message.type === 'hb:session') return { ok: true, loggedIn: true, username: 'harness', linuxdo_id: 9 };
+            // 关掉领取卡片时窗口报的那一条（v0.15.0）：卡片自检只记下来，条目改写由后台负责。
+            if (message.type === 'hb:card-closed') return { ok: true, state };
             if (message.type === 'hb:claim') {
               return {
                 ok: true,
@@ -201,7 +203,7 @@
         const click = (node) => node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         const lottery = entryId === 'hp2';
         // 卡片种类（card.js 的 view 参数）：hp1（待开启的普通红包）与 hp2（未报名的抽奖）走
-        // 领取卡片，其余 id 是详情卡片（hp6 是待开启的条目，详情卡片自己也留着领取入口）。
+        // 领取卡片，其余 id 是详情卡片（hp6 是待开启的条目，点历史行开出来的详情卡片只读）。
         const viewKind = entryId === 'hp1' || entryId === 'hp2' ? 'claim' : 'detail';
         const claims = (type) => sent.filter((message) => message.type === type);
         const packetReads = () => sent.filter((message) => message.type === 'hb:packet');
@@ -301,9 +303,10 @@
             }
 
             if (entryId === 'hp6') {
-              // 点历史行开出来的详情卡片：铺的是进度与领取记录，不摆封口视图；但这个红包还等着
-              // 点一下（古法），所以卡片自己留着「开红包」——关掉后台自动弹出的那张卡片之后仍能领
-              // （v0.13.0 起领取入口跟着条目状态走，不跟着卡片种类走）。
+              // 点历史行开出来的详情卡片：铺的是进度与领取记录，不摆封口视图；这个红包虽然还
+              // 等着点一下（古法），但历史行开出来的这张卡片一律只读、不挂任何领取入口
+              // （v0.15.0 撤回 v0.13.0 那颗「开红包」；脚本版 openHistoryPacket 交出来的历史卡片
+              // 同样从不挂开启入口）。
               check('详情卡片不摆封口视图',
                 Boolean(inCard('#envelope-closed-view')) && inCard('#envelope-closed-view').style.display === 'none',
                 inCard('#envelope-closed-view') && inCard('#envelope-closed-view').style.display);
@@ -316,15 +319,8 @@
                 && Boolean(inCard('#env-claims-list'))
                 && inCard('#env-claims-list').querySelectorAll('.envelope-claim-row').length === 1,
                 inCard('#env-claimed-count') && inCard('#env-claimed-count').textContent);
-              check('还等着点一下的条目在详情卡片里留着「开红包」',
-                Boolean(inCard('#btn-open-packet-detail')) && inCard('#btn-open-packet-detail').hidden === false
-                && inCard('#btn-open-packet-detail').textContent === '开红包',
-                inCard('#btn-open-packet-detail') && inCard('#btn-open-packet-detail').textContent);
-              // 合成点击在 envelope.js 的 runWrite 门口就被 isTrusted 挡下，落到后台的写请求为 0。
-              if (inCard('#btn-open-packet-detail')) click(inCard('#btn-open-packet-detail'));
-              await tick();
-              check('合成点击不授权领取（isTrusted 校验）',
-                claims('hb:claim').length === 0, JSON.stringify(claims('hb:claim')));
+              check('待开启的条目在详情卡片里也不给领取入口', !inCard('#btn-open-packet-detail'),
+                inCard('#btn-open-packet-detail') ? inCard('#btn-open-packet-detail').textContent : '(没有)');
             }
 
             if (entryId === 'hp1') {
@@ -402,6 +398,17 @@
             const bag = sessionBag['hb-card-window'];
             check('窗口关掉后清掉自己那一格会话记录',
               !bag || bag[viewKind] === undefined, JSON.stringify(sessionBag));
+            // 关掉的是那张**领取卡片**（view=claim，条目还等着点一下）时，窗口要告诉后台「这一次
+            // 没有领」，后台据此把历史那一行写成「未领取: 已关闭红包」（v0.15.0）；只读的详情卡片
+            // 关掉什么也不报，条目状态原样留着。
+            const closedReports = claims('hb:card-closed');
+            if (viewKind === 'claim') {
+              check('关掉领取卡片会告诉后台这一次没有领',
+                closedReports.length === 1 && closedReports[0].id === entryId, JSON.stringify(closedReports));
+            } else {
+              check('关掉只读详情卡片不写条目状态',
+                closedReports.length === 0, JSON.stringify(closedReports));
+            }
           }
         } catch (error) {
           failed.push('FAIL 抛出异常 → ' + String(error && error.stack || error));
