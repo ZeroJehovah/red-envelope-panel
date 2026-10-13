@@ -326,6 +326,9 @@ function gapMs() {
 // 与脚本版里那几处裸 request 一致。扩展一度把这几种只读也塞进限速，代价是后台为一个待开奖
 // 的抽奖每 5 秒轮询一次、把刻度一直顶在「刚刚」：用户闲置再久，提交一条口令也要排在后面显示
 // 「排队中」（v0.11.0 修，见 docs/AGENTS.md 的限速一节）。
+//
+// 领取的那次 POST 同样不进这条节奏（v0.12.1）：间隔是给「输入口令」这条接口定的，古法由
+// 点击触发，点下去就当场发出去，既不等间隔也不刷新刻度——正与按 id 只读同一种待遇。
 function gapRemainingMs() {
   const last = Number(state.lastFinishedAt) || 0;
   if (last > Date.now()) throw new Error('系统时钟早于共享时间戳，未发送请求');
@@ -342,7 +345,7 @@ async function waitForGap() {
   }
 }
 
-// 一次口令查询（或一次古法领取的 POST）结束就是新刻度的起点：成功、失败、超时都算结束。
+// 一次口令查询结束就是新刻度的起点：成功、失败、超时都算结束。
 async function markSettled() {
   state.lastFinishedAt = Date.now();
   try {
@@ -353,8 +356,7 @@ async function markSettled() {
 }
 
 // 一条口令的「查询 + 领取」算一次操作：从等间隔开始，到它最后一次请求结束为止。走这条路的是
-// 队列里的口令查询（协议模式的领取跟在同一操作里）；古法点击的领取 POST 由 claimPacket 自己
-// 再等一次间隔，与脚本版 claimPacket 的取锁 → waitForGap → POST 一致。
+// 队列里的口令查询——协议模式的领取跟在同一次操作里，所以它也不额外多等一个间隔。
 async function withQueryGap(task) {
   await waitForGap();
   try {
@@ -436,15 +438,13 @@ async function claimPacket(entry, packet, extraLines = []) {
   claiming.add(entry.id);
   let sent = false;
   try {
-    // 发出前先落状态：请求一旦发出，结果未确认时历史里必须有痕迹。古法由点击触发，
-    // 领取是一次独立操作，同样要等「上一次结束 + 间隔」再发那一次 POST；协议模式下
-    // 队列那条操作已经等过，这里直接过。等待期间条目已在 claiming 里，重复点击被上面
-    // 的检查挡下，一次点击依旧只放行一次请求。
+    // 发出前先落状态：请求一旦发出，结果未确认时历史里必须有痕迹。这一次 POST 不进口令
+    // 查询的间隔（v0.12.1）——点「开」就当场发，条目在 claiming 里挡住重复点击，一次
+    // 点击依旧只放行一次请求。
     entry.status = 'running';
-    entry.lines = match.concat(extraLines, P.line(gapRemainingMs() > 0 ? '正在等待领取间隔…' : '正在开启红包…', 'muted'));
+    entry.lines = match.concat(extraLines, P.line('正在开启红包…', 'muted'));
     entry.result = P.linesText(entry.lines);
     await commit();
-    await waitForGap();
     sent = true;
     const response = await siteRequest(P.grabUrl(packet.id), 'POST');
     const receipt = P.claimReceipt(response, packet);
@@ -462,8 +462,6 @@ async function claimPacket(entry, packet, extraLines = []) {
     };
   } finally {
     claiming.delete(entry.id);
-    // 领取请求的结束也要刷新刻度：无论成功、失败还是超时，下一次都要从这一刻起等。
-    if (sent) await markSettled();
   }
 }
 

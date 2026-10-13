@@ -392,19 +392,17 @@ test('古法：匹配后停在待开启，点击授权才领取一次', async ()
   assert.equal(denied.error, '缺少有效的领取授权，未发送领取请求');
   assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0, '没有真实点击授权就不发 POST');
 
-  // 领取同样等「上一次请求结束 + 间隔」：查询刚返回就点，POST 得等满 5 秒。
-  const approving = env.send({ type: 'hb:claim', id, trusted: true });
-  await env.flush();
-  assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0, '间隔未到不得发 POST');
-  await env.advance(4999);
-  assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0);
-  await env.advance(1);
-  const claimed = await approving;
+  // 领取的那次 POST 不进口令查询的间隔（v0.12.1）：查询刚返回就点也当场发出去，既不额外
+  // 等 5 秒，也不把刻度顶到「刚刚」把后面的口令挤成排队。
+  const clockBeforeClaim = (await env.stored()).lastFinishedAt;
+  const clickedAt = env.clock.now;
+  const claimed = await env.send({ type: 'hb:claim', id, trusted: true });
   assert.equal(claimed.ok, true);
   const posted = env.requests.filter((item) => item.method === 'POST');
   assert.equal(posted.length, 1);
   assert.match(posted[0].url, /\/api\/hongbao\/p1\/grab$/);
-  assert.ok(posted[0].at - env.requests[0].at >= 5000, '领取要等上一次请求结束再加间隔');
+  assert.equal(posted[0].at, clickedAt, '点击即发，不等口令查询的间隔');
+  assert.equal((await env.stored()).lastFinishedAt, clockBeforeClaim, '领取不刷新口令查询的刻度');
 
   const entryAfter = claimed.state.entries[0];
   assert.equal(entryAfter.status, 'done');
