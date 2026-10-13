@@ -350,7 +350,8 @@
           check('填入后计数跟着走', counter().textContent === '8/8', counter().textContent);
           input().value = '';
 
-          // 普通红包：点「开红包」= 开一个独立的详情窗口（面板自己不再画卡片）。
+          // 普通红包：「待开启 + 古法」的条目点「开红包」开的是**领取卡片**——卡片本身在独立
+          // 窗口里，面板自己不画卡片；唤醒不再补弹领取卡片（v0.11.1），历史行就是回到它的路。
           state.entries.push({
             id: 'awaiting-1',
             code: '11775521',
@@ -377,8 +378,8 @@
           await tick();
           const opened = cardWindows[0];
           check('点红包图标开出一个独立窗口', Boolean(opened) && cardWindows.length === 1, JSON.stringify(cardWindows));
-          check('详情窗口指向 card.html 并带上红包 id 与只读视图',
-            Boolean(opened) && opened.url === 'chrome-extension://harness/card.html?id=awaiting-1&view=detail',
+          check('待开启的古法条目开的是领取卡片（card.html 带红包 id 与 view=claim）',
+            Boolean(opened) && opened.url === 'chrome-extension://harness/card.html?id=awaiting-1&view=claim',
             opened && opened.url);
           check('详情窗口是无标签栏的弹窗',
             Boolean(opened) && opened.type === 'popup' && opened.focused === true,
@@ -396,7 +397,7 @@
             && windowUpdates.some((item) => item.id === opened.id && item.focused === true),
             JSON.stringify(windowUpdates));
 
-          // 换个红包：把开着的详情窗口关掉、按新卡片的尺寸重开一个，不留下第二个窗口。
+          // 已完结的红包只开只读详情卡片：它与还开着的领取卡片各占一格（claim / detail），互不顶掉。
           state.entries.push({
             id: 'done-1',
             code: '11775521',
@@ -415,15 +416,45 @@
           if (openButton('done-1')) click(openButton('done-1'));
           await tick();
           await tick();
-          check('换个红包时关掉旧窗口重开一个',
-            windowRemovals.includes(opened.id)
-            && cardWindows.length === 1
-            && cardWindows[0].url === 'chrome-extension://harness/card.html?id=done-1&view=detail',
+          const doneDetail = cardWindows.find((item) => item.url.indexOf('id=done-1') >= 0);
+          check('已完结的红包开只读详情卡片',
+            Boolean(doneDetail)
+            && doneDetail.url === 'chrome-extension://harness/card.html?id=done-1&view=detail',
+            doneDetail && doneDetail.url);
+          check('领取卡片与只读详情卡片各占一格，互不顶掉',
+            cardWindows.length === 2
+            && !windowRemovals.includes(opened.id)
+            && cardWindows.some((item) => item.url.indexOf('id=awaiting-1&view=claim') >= 0),
             JSON.stringify(cardWindows));
-          check('换过之后仍然只有一个详情窗口', cardWindows.length === 1, String(cardWindows.length));
           check('已完结行只给删除动作',
             Boolean(row('done-1').querySelector('button[data-action="delete"]'))
             && !row('done-1').querySelector('button[data-action="void"]'));
+
+          // 同一格里换个红包：detail 那一格的旧窗口收掉、按新卡片的尺寸重开一个，claim 那格不动。
+          state.entries.push({
+            id: 'done-2',
+            code: '11775521',
+            charset: 'numeric',
+            claimMode: 'direct',
+            status: 'done',
+            result: '领取成功: +0.66 LDC',
+            lines: [{ text: '领取成功: +0.66 LDC', tone: 'success' }],
+            packet: { id: 'hp4', type: 'random', status: 'exhausted', code: '11775521', mine: 0.66, creator: { username: 'alice', linuxdo_id: 1 } },
+            packetId: 'hp4',
+            matched: true,
+            createdAt: 4,
+          });
+          notify();
+          await tick();
+          if (openButton('done-2')) click(openButton('done-2'));
+          await tick();
+          await tick();
+          check('同一格换个红包：旧详情窗口收掉重开，领取卡片那格不动',
+            windowRemovals.includes(doneDetail.id)
+            && cardWindows.length === 2
+            && cardWindows.some((item) => item.url.indexOf('id=done-2&view=detail') >= 0)
+            && cardWindows.some((item) => item.url.indexOf('id=awaiting-1&view=claim') >= 0),
+            JSON.stringify(cardWindows) + ' / ' + JSON.stringify(windowRemovals));
 
           // 抽奖红包：先让详情窗口"被用户关掉"（替身里查不到这个窗口了），验证面板会重新开一个，
           // 且尺寸按抽奖卡算。卡片本身的渲染在 card-harness.html 里验。

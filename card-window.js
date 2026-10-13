@@ -52,9 +52,11 @@
     return { width: size.width + FRAME_ESTIMATE_X, height: size.height + FRAME_ESTIMATE_Y };
   }
 
-  // 条目的红包还等着点一下（古法）：只有这样的条目配领取卡片。
+  // 条目的红包还等着点一下（古法）：只有这样的条目配领取卡片。已经报过名的抽奖没有可点的动作
+  // （等开奖是后台看护的事），它开出来的是只读详情卡片。
   function claimable(entry) {
-    return Boolean(entry) && entry.status === 'awaiting' && entry.claimMode === 'manual';
+    return Boolean(entry) && entry.status === 'awaiting' && entry.claimMode === 'manual'
+      && entry.packet?.joined !== true;
   }
 
   function normalizeView(view) {

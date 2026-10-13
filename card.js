@@ -173,7 +173,8 @@
     }
     await rememberWindow();
     packetId = entry.packet.id;
-    claimable = claimView && entry.status === 'awaiting' && entry.claimMode === 'manual';
+    // 领取入口只挂在领取卡片上，而且条目得还等着点一下（判据与 card-window.js 的 claimable 同一份）。
+    claimable = claimView && cardWindow.claimable(entry);
 
     // 先问后台内存里有没有这包的整包快照（刚查询、刚领取回执、开奖看护刚轮询过）。有就直接
     // 拿它铺卡片，一次请求都不发（按 id 只读不进限速，省下的是这一趟网络往返）。会话查询同时出发，不挡显示。

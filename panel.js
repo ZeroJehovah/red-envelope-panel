@@ -545,9 +545,13 @@
   /* ------------------------------ 红包详情窗口 ------------------------------ */
 
   // 打开红包详情：卡片在独立窗口里渲染——弹出面板受浏览器弹窗高度上限（600px）限制，
-  // 卡片按原尺寸（384×624、抽奖 504×768）会被压扁。这里开出来的永远是**只读的详情卡片**
-  // （脚本版 openHistoryPacket 也是同一副只读视图，从不给历史卡片挂开启按钮）：等着点一下的
-  // 领取卡片是口令查到可领的红包后由后台自动弹出的那一张，两种卡片各占一个窗口、互不顶掉。
+  // 卡片按原尺寸（384×624、抽奖 504×768）会被压扁。
+  //
+  // 「待开启 + 古法」的条目开的还是**领取卡片**（脚本版里那张还摆在页面上、等着点一下的卡
+  // 片）：关掉卡片不改条目状态，条目仍是待开启，所以历史行得留一条回到那张卡片的路——后台只在
+  // 「这一次刚查到可领」时弹卡，唤醒不再补弹（v0.11.1），这条路就是它。其余条目（已领取、已开
+  // 奖、等开奖的抽奖……）一律只读详情卡片，与脚本版 openHistoryPacket 同一副只读视图，从不给
+  // 历史卡片挂开启按钮。两种卡片各占一个窗口，互不顶掉。
   async function openEnvelopeWindow(id) {
     const entry = (lastState?.entries || []).find((item) => item.id === id);
     if (!entry?.packet?.id) {
@@ -558,7 +562,8 @@
       warn('红包详情窗口脚本未加载，请重新打开面板。');
       return;
     }
-    const result = await cardWindow.open({ id, entry, packet: entry.packet, view: 'detail' });
+    const view = cardWindow.claimable(entry) ? 'claim' : 'detail';
+    const result = await cardWindow.open({ id, entry, packet: entry.packet, view });
     if (result.ok !== true) warn('打开红包详情窗口失败：' + result.error);
   }
 

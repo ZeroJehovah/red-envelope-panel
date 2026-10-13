@@ -264,7 +264,11 @@ test('历史行的开红包走独立详情窗口', () => {
 
   // 面板只负责把详情卡片叫起来：卡片尺寸与窗口复用都在 card-window.js。
   const panel = readFileSync(join(root, 'panel.js'), 'utf8');
-  assert.match(panel, /cardWindow\.open\(\{ id, entry, packet: entry\.packet, view: 'detail' \}\)/, '面板没有开只读详情卡片');
+  // 历史行开哪一种卡片由条目状态决定：还等着点一下的（待开启 + 古法 + 抽奖未报名）开领取卡片
+  // ——后台只在「这一次刚查到可领」时弹卡，唤醒不再补弹（v0.11.1），历史行是回到那张卡片的
+  // 唯一入口；其余条目一律只读详情卡片（脚本版 openHistoryPacket 同视图）。
+  assert.match(panel, /const view = cardWindow\.claimable\(entry\) \? 'claim' : 'detail';/, '面板没有按条目状态挑卡片种类');
+  assert.match(panel, /cardWindow\.open\(\{ id, entry, packet: entry\.packet, view \}\)/, '面板没有把挑好的卡片种类交给开窗');
   assert.equal(/envelope\.show\(/.test(panel), false, '面板又在自己的页面里画卡片');
   assert.equal(/globalThis\.HBEnvelope/.test(panel), false, '面板又借 envelope.js 算尺寸了');
 
@@ -277,11 +281,11 @@ test('历史行的开红包走独立详情窗口', () => {
   assert.match(card, /const params = new URLSearchParams\(location\.search\);/, '详情窗口没有解析 URL 参数');
   assert.match(card, /const entryId = params\.get\('id'\) \|\| '';/, '详情窗口没有从 URL 取红包 id');
   assert.match(card, /envelope\.show\(\{/, '详情窗口没有挂卡片');
-  // 领取动作只挂在「口令查到后自动弹出」的那一副卡片上：URL 带 view=claim 才可领，点历史行
-  // 开出来的只读详情卡片不带领取入口（脚本版 openHistoryPacket 同样从不给历史卡片挂开启按钮）。
+  // 领取动作只挂在「等着点一下」的那一副卡片上：URL 带 view=claim、条目仍是待开启、包里没有
+  // 报名记录才可领；只读详情卡片不带领取入口（脚本版 openHistoryPacket 同样从不给历史卡片挂
+  // 开启按钮）。判据与 card-window.js 共一份，别在两处各写一套。
   assert.match(card, /const claimView = params\.get\('view'\) === 'claim';/, '详情窗口没有按 URL 区分卡片种类');
-  assert.match(card, /claimable = claimView && entry\.status === 'awaiting' && entry\.claimMode === 'manual';/,
-    '历史开出来的详情卡片还在带领取入口');
+  assert.match(card, /claimable = claimView && cardWindow\.claimable\(entry\);/, '领取入口的判据没有和开窗那一份共用');
   // 领取与参与照旧回到后台的一次性授权链路：真实点击 → hb:claim（trusted），后台再校验状态。
   assert.match(card, /onWrite: \(\) => send\(\{ type: 'hb:claim', id: entryId, trusted: true \}\)/, '领取与参与没有走后台的一次性授权');
   // 窗口自己认领：起来时登记窗口号与卡片种类（面板与后台据此复用），关掉时只清自己那一条。

@@ -788,20 +788,24 @@ test('开奖迟迟不来就收摊：写下未确认文案，队列继续可用',
   assert.equal(env.alarms.has('hb-queue-tick'), false, '收摊后清掉兜底闹钟');
 });
 
-test('重载已报名的抽奖只重新装看护，不重复报名', async () => {
+test('唤醒不重查待开启的抽奖：看护按落库的收摊时刻装回来，不重复报名', async () => {
   const stored = {
     entries: [entry({
       claimMode: 'manual',
       status: 'awaiting',
       packetId: 'L1',
       matched: true,
+      // v0.11.1 起看护的收摊时刻跟着条目落库：唤醒后不必再查一遍口令就知道该盯到什么时候。
+      watchUntil: START + 60_000 + 120_000,
+      lines: [{ text: '已参与抽选，等待开奖', tone: 'success' }],
+      result: '已参与抽选，等待开奖',
       packet: { id: 'L1', type: 'lottery', status: 'active', joined: true, creator: { username: 'alice', linuxdo_id: 1 }, draw_at: START + 60000, server_now: START },
     })],
     removed: [],
     settings: {},
     paused: false,
     pausedReason: '',
-    lastStartedAt: 0,
+    lastFinishedAt: START - 600_000,
   };
   // 看护装上就按 id 裸轮询（脚本版 watchLotteryDraw 同样一装上就读一次），
   // 什么时候读到开奖结果由 drawnNow 决定。
@@ -822,8 +826,11 @@ test('重载已报名的抽奖只重新装看护，不重复报名', async () =>
   await env.flush();
   const state = await env.send({ type: 'hb:state:get' });
   assert.equal(state.state.entries[0].status, 'awaiting');
-  assert.equal(state.state.entries[0].result, '已参与抽选，等待开奖');
+  assert.equal(state.state.entries[0].result, '已参与抽选，等待开奖', '待开启的行不再被重查，写入结果原样留着');
   assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0, '已报名的口令不得再次报名');
+  assert.equal(env.requests.filter((item) => item.url.includes('text-code')).length, 0,
+    '唤醒不该再发一次口令查询（它会顶掉限速刻度）');
+  assert.equal((await env.stored()).lastFinishedAt, START - 600_000, '唤醒不该碰限速刻度');
   assert.ok(env.requests.filter((item) => item.url.endsWith('/api/hongbao/L1')).length >= 1, '看护没有装回来');
 
   // 看护读到开奖结果就把结果写回同一行（这条口令不再报名一次）。
@@ -832,6 +839,55 @@ test('重载已报名的抽奖只重新装看护，不重复报名', async () =>
   const after = await env.send({ type: 'hb:state:get' });
   assert.equal(after.state.entries[0].status, 'done');
   assert.equal(after.state.entries[0].result, '未抽中');
+  assert.equal(after.state.entries[0].watchUntil, null, '落定后不再留收摊时刻');
+});
+
+test('老记录没有收摊时刻：唤醒时自愈一次，重查口令后把它补齐', async () => {
+  // v0.11.0 及以前写下的待开启抽奖没有 watchUntil。这样的老记录仍按老路走一次（回队列重查
+  // 口令），查到 joined 就把收摊时刻落库，往后每次唤醒都不再重查。
+  const stored = {
+    entries: [entry({
+      id: 'legacy-1',
+      code: LOTTERY_CODE,
+      claimMode: 'manual',
+      status: 'awaiting',
+      packetId: 'L1',
+      matched: true,
+      packet: { id: 'L1', type: 'lottery', status: 'active', joined: true, creator: { username: 'alice', linuxdo_id: 1 }, draw_at: START + 60_000, server_now: START },
+    })],
+    removed: [],
+    settings: {},
+    paused: false,
+    pausedReason: '',
+    lastFinishedAt: START - 600_000,
+  };
+  const env = await createEnv({
+    stored,
+    handler: lotteryHandler({
+      join: () => ({ status: 200, body: { joined: true, already: true, packet: null } }),
+      byId: () => ({ status: 200, body: { ...LOTTERY_PACKET, joined: true } }),
+      query: () => ({ status: 200, body: { ...LOTTERY_PACKET, joined: true } }),
+    }),
+  });
+  await env.flush();
+
+  assert.equal(env.requests.filter((item) => item.url.includes('text-code')).length, 1, '老记录该重查一次口令');
+  assert.equal(env.requests.filter((item) => item.method === 'POST').length, 0, '重查不等于重新报名');
+  const healed = (await env.stored()).entries[0];
+  assert.equal(healed.status, 'awaiting');
+  assert.equal(healed.watchUntil, START + 60_000 + 120_000, '重查后该把收摊时刻补齐');
+
+  // 补齐之后再唤醒一次（同一份 storage）：这次不该再发口令查询。
+  const second = await createEnv({
+    stored: await env.stored(),
+    handler: lotteryHandler({
+      join: () => ({ status: 200, body: { joined: true, already: true, packet: null } }),
+      byId: () => ({ status: 200, body: { ...LOTTERY_PACKET, joined: true } }),
+      query: () => ({ status: 200, body: { ...LOTTERY_PACKET, joined: true } }),
+    }),
+  });
+  await second.flush();
+  assert.equal(second.requests.filter((item) => item.url.includes('text-code')).length, 0, '补齐后不该再重查');
 });
 
 test('按 id 只读不进限速：看护轮询不刷新刻度，闲置很久后提交口令立即发出', async () => {
@@ -848,6 +904,7 @@ test('按 id 只读不进限速：看护轮询不刷新刻度，闲置很久后�
       packetId: 'L1',
       matched: true,
       status: 'awaiting',
+      watchUntil: START + 7200_000 + 120_000,
       packet: { id: 'L1', type: 'lottery', status: 'active', joined: true, creator: { username: 'alice', linuxdo_id: 1 }, draw_at: START + 7200_000, server_now: START },
     })],
     removed: [],
@@ -866,8 +923,11 @@ test('按 id 只读不进限速：看护轮询不刷新刻度，闲置很久后�
     },
   });
   await env.flush();
-  // worker 醒来会重新查询这条口令（它就是查询接口，所以在这里推进刻度），看护随即装回来。
-  assert.equal((await env.stored()).lastFinishedAt, START, '唤醒后那次重新查询应该结束刻度');
+  // 唤醒不重查口令（v0.11.1）：刻度还是十分钟前那次查询留下的，看护直接从落库的收摊时刻装
+  // 回来（按 id 只读，不进限速）。
+  assert.equal((await env.stored()).lastFinishedAt, START - 600_000, '唤醒不该碰限速刻度');
+  assert.equal(env.requests.filter((item) => item.url.includes('text-code')).length, 0,
+    '唤醒不该重查待开启的口令');
   await env.advance(1000);
   assert.ok(env.requests.filter((item) => item.url.endsWith('/api/hongbao/L1')).length >= 1, '看护没有装回来');
 
@@ -878,7 +938,7 @@ test('按 id 只读不进限速：看护轮询不刷新刻度，闲置很久后�
   const polls = env.requests.slice(mark).filter((item) => item.url.endsWith('/api/hongbao/L1'));
   assert.ok(polls.length >= 8, '看护该按 3 秒节奏轮询，实际 ' + polls.length + ' 次');
   assert.equal(polls[1].at - polls[0].at, 3000, '看护轮询节奏是 3 秒');
-  assert.equal((await env.stored()).lastFinishedAt, START, '看护轮询不得刷新限速刻度');
+  assert.equal((await env.stored()).lastFinishedAt, START - 600_000, '看护轮询不得刷新限速刻度');
 
   // 这时提交一条口令：口令查询立刻发出——上一次查询已经过去一小时，面板不该显示「排队中」。
   const submitted = await env.send({ type: 'hb:submit', codes: [{ code: HAPPY_CODE, charset: 'text' }], claimMode: 'manual' });
@@ -890,6 +950,56 @@ test('按 id 只读不进限速：看护轮询不刷新刻度，闲置很久后�
   const row = (await env.send({ type: 'hb:state:get' })).state.entries
     .find((item) => item.code === HAPPY_CODE);
   assert.equal(row.status, 'done', '新口令该立刻查完，而不是停在排队中');
+});
+
+test('唤醒不重弹领取卡片：待开启条目原地待着，刚提交的口令立刻发出', async () => {
+  // 用户报的现象（v0.11.1 修）：闲置很久之后打开面板，历史里留着一条古法「待开启」的口令。
+  // 旧行为是唤醒时把它降级回队列、重查一遍口令——重查走的正是古法那条路，于是领取卡片又弹
+  // 一次，而这次重查占掉的间隔（刻度被顶到「刚刚」）会把紧接着提交的口令挤成「排队中」，
+  // 等满一个间隔才轮到它。
+  const stored = {
+    entries: [entry({
+      id: 'old-1',
+      code: HAPPY_CODE,
+      claimMode: 'manual',
+      status: 'awaiting',
+      packetId: 'p1',
+      matched: true,
+      lines: [{ text: '恭喜发财，大吉大利', tone: 'normal' }, { text: '等待手动开启', tone: 'muted' }],
+      result: '等待手动开启',
+      packet: { id: 'p1', type: 'random', status: 'active', creator: { username: 'alice', linuxdo_id: 1 } },
+    })],
+    removed: [],
+    settings: {},
+    paused: false,
+    pausedReason: '',
+    lastFinishedAt: START - 600_000,
+  };
+  const env = await createEnv({
+    stored,
+    handler: (url) => (url.endsWith('/api/me') ? sessionUser : { status: 200, body: ACTIVE_PACKET }),
+  });
+  await env.flush();
+
+  assert.equal(env.requests.filter((item) => item.url.includes('text-code')).length, 0, '唤醒不该重查待开启的口令');
+  assert.equal(env.cardWindows.length, 0, '唤醒不该把领取卡片再弹一次');
+  assert.equal((await env.stored()).lastFinishedAt, START - 600_000, '唤醒不该顶限速刻度');
+  const woke = await env.send({ type: 'hb:state:get' });
+  assert.equal(woke.state.entries[0].status, 'awaiting');
+  assert.equal(woke.state.entries[0].result, '等待手动开启', '待开启的条目不再重查，行里的结果照旧');
+
+  // 紧接着提交一条新口令：刻度还是十分钟前那次查询留下的，它该立刻发出去。
+  await env.send({ type: 'hb:submit', codes: [{ code: HAPPY_CODE_2, charset: 'text' }], claimMode: 'manual' });
+  await env.flush();
+  const queried = env.requests.filter((item) => item.url.includes(encodeURIComponent(HAPPY_CODE_2)));
+  assert.equal(queried.length, 1, '新口令该立刻发出');
+  assert.equal(queried[0].at, env.clock.now);
+  const rows = (await env.send({ type: 'hb:state:get' })).state.entries;
+  assert.deepEqual(plain(rows.map((item) => item.status)), ['awaiting', 'awaiting'],
+  '两条都停在待开启，没有谁卡在排队中');
+  // 查询照旧把领取卡片弹出来：这条正常路径没有变，变的只是「唤醒时不再补弹一次」。
+  assert.equal(env.cardWindows.length, 1, '查到可领的红包照旧弹领取卡片');
+  assert.match(env.cardWindows[0].url, /\?id=.*&view=claim$/);
 });
 
 test('停靠/悬浮决定点图标做什么：后台按显示方式切侧边栏行为与 popup', async () => {

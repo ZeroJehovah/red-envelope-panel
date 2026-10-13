@@ -64,6 +64,12 @@ function createId() {
 /* --------------------------------- 状态层 --------------------------------- */
 
 // 一条口令从入队到落到历史的全过程；字段与脚本版 normalizeEntry 对齐。
+//
+// 「待开启」不是一条待发的请求，而是「卡片已经摆出来、等着点一下」这个状态。脚本版把它按页面
+// 重载处理（重查一遍口令、卡片摆回来），扩展里 worker 被回收再唤醒是几十秒一次的常态，照做
+// 的代价是唤醒时把限速刻度顶到「刚刚」（刚提交的口令于是显示「排队中」）并从古法那边把领取
+// 卡片一遍遍弹回来（v0.11.1 修）。快照与 packetId 都落了库，这里就让待开启的条目原地待着；
+// 只有连快照都没有的老记录（画不出卡片）才回队列重新查询。
 function normalizeEntry(raw) {
   if (!raw || typeof raw !== 'object' || typeof raw.code !== 'string' || !raw.code) return null;
   const statuses = ['queued', 'awaiting', 'running', 'done', 'failed', 'void'];
@@ -72,22 +78,34 @@ function normalizeEntry(raw) {
   // 重载无法知道被打断的请求结果，按脚本版语义记为失败并写明“结果未确认”。
   const interrupted = raw.status === 'running';
   const lines = P.normalizeLines(raw.lines);
+  const packet = isPlainObject(raw.packet) ? raw.packet : null;
+  const watchUntil = Number(raw.watchUntil);
+  const restorableWatch = Number.isFinite(watchUntil) && watchUntil > 0;
+  const deferred = raw.status === 'awaiting' && typeof packet?.id === 'string' && Boolean(packet.id);
+  // 已报名的抽奖还要把开奖看护装回来：收摊时刻落了库就按它接着按 id 轮询（不进限速），老记录
+  // 没有这个字段时才回队列重查一次口令，查到 joined 就把收摊时刻补齐。
+  const watching = deferred && P.isLottery(packet) && packet.joined === true;
+  const awaiting = deferred && (!watching || restorableWatch);
   return {
     id: typeof raw.id === 'string' && raw.id ? raw.id : createId(),
     code: raw.code,
-    claimMode: raw.status === 'awaiting' ? 'manual' : (raw.claimMode === 'direct' ? 'direct' : 'manual'),
+    // 领取方式在提交时固定（脚本版同语义）：只认存下来的值，不按状态改写。
+    claimMode: raw.claimMode === 'direct' ? 'direct' : 'manual',
     packetId: typeof raw.packetId === 'string' && raw.packetId ? raw.packetId : null,
     matched: P.hasMatchedPacket(raw),
     charset: raw.charset === 'numeric' ? 'numeric' : 'text',
-    // 等待人工开启的条目没有发出过领取请求，重载后重新查询。
-    status: raw.status === 'awaiting' ? 'queued' : (interrupted ? 'failed' : (statuses.includes(raw.status) ? raw.status : 'failed')),
+    status: awaiting ? 'awaiting'
+      : (raw.status === 'awaiting' ? 'queued' : (interrupted ? 'failed' : (statuses.includes(raw.status) ? raw.status : 'failed'))),
     result: interrupted ? P.INTERRUPTED_RESULT : (typeof raw.result === 'string' ? raw.result : ''),
-    lines: interrupted || raw.status === 'awaiting' ? null : lines,
-    packet: isPlainObject(raw.packet) ? raw.packet : null,
+    // 待开启的条目不再重查，它那几行结果（匹配到的祝福、「等待手动开启」等）原样留着。
+    lines: interrupted ? null : lines,
+    packet,
     createdAt: Number.isFinite(Number(raw.createdAt)) ? Number(raw.createdAt) : Date.now(),
     startedAt: Number.isFinite(startedAt) ? startedAt : null,
     finishedAt: interrupted ? Date.now() : (Number.isFinite(finishedAt) ? finishedAt : null),
-    scheduledAt: null, // watchUntil/watchNextAt 有意不落库：重载后重新查询口令再装看护
+    // 开奖看护的收摊时刻落库（绝对时刻，服务器钟偏已在写入时算掉）；下次轮询时刻按唤醒时间重排。
+    watchUntil: awaiting && restorableWatch ? watchUntil : null,
+    scheduledAt: null,
   };
 }
 
@@ -101,7 +119,7 @@ function preserveEntry(raw) {
   return {
     id: typeof raw.id === 'string' && raw.id ? raw.id : createId(),
     code: raw.code,
-    claimMode: raw.status === 'awaiting' ? 'manual' : (raw.claimMode === 'direct' ? 'direct' : 'manual'),
+    claimMode: raw.claimMode === 'direct' ? 'direct' : 'manual',
     packetId: typeof raw.packetId === 'string' && raw.packetId ? raw.packetId : null,
     matched: P.hasMatchedPacket(raw),
     charset: raw.charset === 'numeric' ? 'numeric' : 'text',
@@ -112,6 +130,7 @@ function preserveEntry(raw) {
     createdAt: Number.isFinite(Number(raw.createdAt)) ? Number(raw.createdAt) : Date.now(),
     startedAt: Number.isFinite(startedAt) ? startedAt : null,
     finishedAt: Number.isFinite(finishedAt) ? finishedAt : null,
+    watchUntil: Number.isFinite(Number(raw.watchUntil)) && Number(raw.watchUntil) > 0 ? Number(raw.watchUntil) : null,
     scheduledAt: null,
   };
 }
@@ -164,6 +183,15 @@ function normalizeState(raw) {
   if (loaded.removed.length) {
     const gone = new Set(loaded.removed.map((item) => item.id));
     loaded.entries = loaded.entries.filter((entry) => !gone.has(entry.id));
+  }
+  // 已报名、还没开奖的抽奖：唤醒后不重查口令，按落库的收摊时刻把看护直接装回来（按 id 只读
+  // 的一轮轮询在 tick 里进行，不进限速）。下一次轮询时刻不落库，这里按唤醒时间重排。
+  const wakeAt = Date.now();
+  for (const entry of loaded.entries) {
+    if (entry.status === 'awaiting' && Number.isFinite(entry.watchUntil)
+      && P.isLottery(entry.packet) && entry.packet.joined === true) {
+      entry.watchNextAt = wakeAt;
+    }
   }
   return loaded;
 }
@@ -449,8 +477,9 @@ async function runEntry(entry) {
   return claimPacket(entry, packet);
 }
 
-// 抽奖红包：/grab 只是报名，钱等服务器在 draw_at 开奖。重载会让条目回到队列重新
-// 查一次口令，看到 joined 就重新装上同一个看护，所以本地不需要持久化任何定时器。
+// 抽奖红包：/grab 只是报名，钱等服务器在 draw_at 开奖。报名成功后看护的收摊时刻落库
+// （settle 里写 entry.watchUntil），唤醒时按它直接装回来；缺这个字段的老记录才回到队列
+// 重查一次口令、看到 joined 再补齐（v0.11.1）。
 async function runLotteryEntry(entry, packet, user) {
   const match = P.matchLines(packet);
   // 已经抽完（或不再可参与）的抽奖是终局，判定与历史行共用 packetOutcome。
@@ -571,7 +600,8 @@ async function settle(entry, outcome) {
   entry.result = P.linesText(entry.lines);
   entry.finishedAt = outcome.awaiting ? null : Date.now();
   entry.scheduledAt = null;
-  // 报名过的抽奖进看护：看护只活在这轮 worker 里，重载靠重新查询口令再装一次。
+  // 报名过的抽奖进看护：收摊时刻按绝对时刻落库（服务器钟偏已在写入时算掉），worker
+  // 被回收后按它直接装回来；内存里的轮询节奏与定时器本来就不落库。
   if (entry.status === 'awaiting' && P.isLottery(entry.packet) && entry.packet.joined === true) {
     entry.watchUntil = P.watchDeadline(entry.packet, Date.now());
     entry.watchNextAt = Date.now();
